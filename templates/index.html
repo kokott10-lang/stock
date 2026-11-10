@@ -86,9 +86,9 @@
   <section class="card">
     <h2>설정</h2>
 
-    <label for="q">종목 검색</label>
+    <label for="q">종목 · ETF 검색</label>
     <div class="search">
-      <input id="q" placeholder="종목명 또는 코드 (예: 현대차, 005380)" autocomplete="off">
+      <input id="q" placeholder="예: 현대차, 005380, 나스닥100, S&amp;P500, QQQ" autocomplete="off">
       <div class="results" id="results"></div>
     </div>
     <div class="picked" id="picked"></div>
@@ -120,7 +120,8 @@
   <section class="stack">
     <div class="card" id="resultCard">
       <h2 id="resultTitle">결과</h2>
-      <div class="empty" id="empty">종목을 검색해 선택한 뒤 백테스트를 실행하세요.</div>
+      <p class="desc" id="note" hidden></p>
+      <div class="empty" id="empty">종목이나 ETF를 검색해 선택한 뒤 백테스트를 실행하세요.</div>
       <div id="result" hidden>
         <div class="kpis" id="kpis"></div>
         <div class="chart-wrap"><canvas id="chart"></canvas></div>
@@ -308,6 +309,8 @@ function render(d) {
     ["샤프 지수", s["Sharpe Ratio"] == null ? "-" : s["Sharpe Ratio"].toFixed(2), ""],
     ["보유 기간 비중", s["Exposure Time [%]"] == null ? "-" : s["Exposure Time [%]"].toFixed(1) + "%", ""],
   ];
+  $("note").hidden = !d.note;
+  $("note").textContent = d.note || "";
   $("kpis").innerHTML = "";
   for (const [k, v, cls] of kpis) {
     const el = document.createElement("div");

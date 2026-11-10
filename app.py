@@ -9,6 +9,7 @@ import threading
 import uuid
 from datetime import date, timedelta
 
+import pandas as pd
 from flask import Flask, abort, jsonify, render_template, request, send_file
 
 import backtest_core as core
@@ -25,7 +26,7 @@ def listing():
     global _listing
     with _lock:
         if _listing is None:
-            _listing = core.load_listing()
+            _listing = core.load_listing()  # (DataFrame, 실패한 목록들)
         return _listing
 
 
@@ -35,11 +36,9 @@ def api_search():
     if not q:
         return jsonify([])
     try:
-        df = listing()
-    except Exception as e:  # noqa: BLE001
-        if q.isdigit() and len(q) == 6:  # 목록이 없어도 종목코드는 그대로 사용
-            return jsonify([{"Code": q, "Name": q, "Market": "코드 직접 입력"}])
-        return jsonify({"error": f"종목 목록을 불러오지 못했습니다. 6자리 종목코드로 입력해 보세요. ({e})"}), 502
+        df, _errors = listing()
+    except Exception:  # noqa: BLE001
+        df = pd.DataFrame(columns=["Code", "Name", "Market", "_key"])
     return jsonify(core.search_listing(df, q).to_dict("records"))
 
 
@@ -79,6 +78,7 @@ def api_backtest():
     return jsonify({
         "code": code,
         "bars": len(df),
+        "note": core.price_note(code),
         "summary": res["summary"],
         "curve": {
             "dates": [d.strftime("%Y-%m-%d") for d in c.index],

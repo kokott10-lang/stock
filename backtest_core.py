@@ -6,6 +6,7 @@
 """
 import logging
 import math
+import re
 
 import pandas as pd
 import FinanceDataReader as fdr
@@ -18,54 +19,176 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # 데이터
 # ---------------------------------------------------------------------------
-def load_listing() -> pd.DataFrame:
-    """KRX 전 종목 (Code, Name, Market)."""
-    df = None
-    # 1) FinanceDataReader KRX 전체  2) KOSPI+KOSDAQ 따로  3) pykrx
+# 미국 주요 ETF (FinanceDataReader 의 해외 ETF 목록 기능이 중단되어 직접 관리)
+US_ETFS = [
+    ("QQQ", "Invesco QQQ (나스닥100)"),
+    ("QQQM", "Invesco QQQM (나스닥100)"),
+    ("TQQQ", "ProShares UltraPro QQQ (나스닥100 3배)"),
+    ("QLD", "ProShares Ultra QQQ (나스닥100 2배)"),
+    ("SQQQ", "ProShares UltraPro Short QQQ (나스닥100 -3배)"),
+    ("SPY", "SPDR S&P500"),
+    ("VOO", "Vanguard S&P500"),
+    ("IVV", "iShares Core S&P500"),
+    ("SPLG", "SPDR Portfolio S&P500"),
+    ("UPRO", "ProShares UltraPro S&P500 (3배)"),
+    ("SSO", "ProShares Ultra S&P500 (2배)"),
+    ("DIA", "SPDR 다우존스 (Dow Jones)"),
+    ("IWM", "iShares 러셀2000 (Russell 2000)"),
+    ("VTI", "Vanguard 미국 전체시장 (Total Stock Market)"),
+    ("VT", "Vanguard 전세계 주식 (Total World)"),
+    ("SCHD", "Schwab 미국 배당 (Dividend Equity)"),
+    ("JEPI", "JPMorgan 프리미엄 인컴 (커버드콜)"),
+    ("JEPQ", "JPMorgan 나스닥 프리미엄 인컴 (커버드콜)"),
+    ("SOXX", "iShares 반도체 (Semiconductor)"),
+    ("SMH", "VanEck 반도체 (Semiconductor)"),
+    ("SOXL", "Direxion 반도체 3배 (Semiconductor Bull 3X)"),
+    ("XLK", "Technology Select Sector (기술주)"),
+    ("VGT", "Vanguard 정보기술 (IT)"),
+    ("XLE", "Energy Select Sector (에너지)"),
+    ("XLF", "Financial Select Sector (금융)"),
+    ("ARKK", "ARK Innovation (혁신기업)"),
+    ("EFA", "iShares 선진국 (MSCI EAFE)"),
+    ("EEM", "iShares 신흥국 (MSCI Emerging Markets)"),
+    ("EWY", "iShares 한국 (MSCI South Korea)"),
+    ("TLT", "iShares 미국채 20년+ (장기채)"),
+    ("IEF", "iShares 미국채 7-10년 (중기채)"),
+    ("SHY", "iShares 미국채 1-3년 (단기채)"),
+    ("BND", "Vanguard 미국 종합채권 (Total Bond)"),
+    ("TMF", "Direxion 미국채 20년+ 3배"),
+    ("GLD", "SPDR 금 (Gold)"),
+    ("IAU", "iShares 금 (Gold)"),
+    ("SLV", "iShares 은 (Silver)"),
+    ("USO", "United States Oil (원유)"),
+    ("VNQ", "Vanguard 리츠 (REIT)"),
+    ("IBIT", "iShares 비트코인 (Bitcoin Trust)"),
+]
+
+# 검색어 별칭: 이름에 이 패턴이 있으면 별칭으로도 검색되게
+ALIASES = [
+    (r"(?<![0-9])200(?![0-9])", "코스피200 kospi200"),
+    (r"나스닥|nasdaq|qqq", "나스닥100 nasdaq100 나스닥"),
+    (r"s&p|sp500|s&p500", "s&p500 sp500 에스앤피500 에스엔피500"),
+    (r"코스닥150", "kosdaq150"),
+    (r"다우|dow", "다우존스 dowjones"),
+    (r"반도체|semiconductor", "반도체 semiconductor"),
+]
+
+
+def _norm(text: str) -> str:
+    """검색용 정규화: 소문자, 공백·기호 제거"""
+    return "".join(ch for ch in str(text).lower() if ch.isalnum())
+
+
+def is_foreign(code: str) -> bool:
+    """6자리 숫자가 아니면 해외(미국) 종목으로 간주"""
+    return not (code.isdigit() and len(code) == 6)
+
+
+def load_listing():
+    """
+    검색용 전체 목록 (Code, Name, Market, _key) 과 실패한 항목 설명 목록을 반환.
+    국내 주식 / 국내 ETF / 미국 ETF 를 각각 따로 불러와, 일부가 실패해도 나머지는 사용.
+    """
+    parts, errors = [], []
+
+    # 1) 국내 주식: FinanceDataReader KRX → KOSPI+KOSDAQ → pykrx
+    stocks = None
     for markets in (["KRX"], ["KOSPI", "KOSDAQ"]):
         try:
-            parts = []
+            ps = []
             for m in markets:
                 raw = fdr.StockListing(m)
                 part = raw[["Code", "Name"]].copy()
                 part["Market"] = raw["Market"] if "Market" in raw else m
-                parts.append(part)
-            df = pd.concat(parts)
+                ps.append(part)
+            stocks = pd.concat(ps)
             break
         except Exception as e:  # noqa: BLE001
             log.warning("FinanceDataReader 종목 목록(%s) 실패: %s", markets, e)
-    if df is None or df.empty:
-        from pykrx import stock
+    if stocks is None or stocks.empty:
+        try:
+            from pykrx import stock
 
-        rows = []
-        for market in ("KOSPI", "KOSDAQ"):
-            for code in stock.get_market_ticker_list(market=market):
-                rows.append((code, stock.get_market_ticker_name(code), market))
-        df = pd.DataFrame(rows, columns=["Code", "Name", "Market"])
-        if df.empty:
-            raise RuntimeError("종목 목록을 불러오지 못했습니다")
-    df["Code"] = df["Code"].astype(str).str.zfill(6)
-    return df.drop_duplicates("Code").reset_index(drop=True)
+            rows = []
+            for market in ("KOSPI", "KOSDAQ"):
+                for code in stock.get_market_ticker_list(market=market):
+                    rows.append((code, stock.get_market_ticker_name(code), market))
+            stocks = pd.DataFrame(rows, columns=["Code", "Name", "Market"])
+        except Exception as e:  # noqa: BLE001
+            log.warning("pykrx 종목 목록 실패: %s", e)
+    if stocks is not None and not stocks.empty:
+        parts.append(stocks)
+    else:
+        errors.append("국내 주식 목록")
+
+    # 2) 국내 ETF (네이버)
+    try:
+        raw = fdr.StockListing("ETF/KR")
+        etf = raw[["Symbol", "Name"]].rename(columns={"Symbol": "Code"})
+        etf["Market"] = "ETF"
+        parts.append(etf)
+    except Exception as e:  # noqa: BLE001
+        log.warning("국내 ETF 목록 실패: %s", e)
+        errors.append("국내 ETF 목록")
+
+    # 3) 미국 ETF (고정 목록)
+    parts.append(pd.DataFrame([(c, n, "미국 ETF") for c, n in US_ETFS], columns=["Code", "Name", "Market"]))
+
+    df = pd.concat(parts, ignore_index=True)
+    df["Code"] = df["Code"].astype(str)
+    kr = ~df["Market"].eq("미국 ETF")
+    df.loc[kr, "Code"] = df.loc[kr, "Code"].str.zfill(6)
+    df = df.drop_duplicates("Code").reset_index(drop=True)
+
+    def key(row):
+        extra = " ".join(a for pat, a in ALIASES if re.search(pat, row.Name, re.I))
+        return _norm(f"{row.Name} {row.Code} {extra}")
+    df["_key"] = [key(r) for r in df.itertuples()]
+    return df, errors
 
 
-def search_listing(df: pd.DataFrame, q: str, limit: int = 20) -> pd.DataFrame:
-    """종목명/코드 검색. 정확히 일치 → 앞부분 일치 → 포함 순."""
+def search_listing(df: pd.DataFrame, q: str, limit: int = 30) -> pd.DataFrame:
+    """종목명/코드/별칭 검색. 이름 정확히 일치 → 앞부분 일치 → 포함 순, 같은 순위면 짧은 이름 먼저."""
     q = q.strip()
     if not q:
-        return df.iloc[0:0]
-    ql = q.lower()
-    name_l = df["Name"].str.lower()
-    hit = df[name_l.str.contains(ql, regex=False) | df["Code"].str.startswith(q)]
-    nl = name_l[hit.index]
-    rank = (nl != ql).astype(int) * 2 + (~nl.str.startswith(ql)).astype(int)
-    hit = hit.assign(_r=rank, _l=hit["Name"].str.len()).sort_values(["_r", "_l"])
-    return hit[["Code", "Name", "Market"]].head(limit).reset_index(drop=True)
+        return df.iloc[0:0][["Code", "Name", "Market"]]
+    nq = _norm(q)
+    if not nq:
+        return df.iloc[0:0][["Code", "Name", "Market"]]
+    code_hit = df["Code"].str.upper().str.startswith(q.upper())
+    hit = df[df["_key"].str.contains(nq, regex=False) | code_hit].copy()
+    nn = hit["Name"].map(_norm)
+    hit["_r"] = (nn != nq).astype(int) * 2 + (~nn.str.startswith(nq)).astype(int)
+    hit.loc[hit["Code"].str.upper() == q.upper(), "_r"] = -1
+    hit["_l"] = hit["Name"].str.len()
+    out = hit.sort_values(["_r", "_l"])[["Code", "Name", "Market"]].head(limit).reset_index(drop=True)
+
+    # 목록에 없는 코드도 직접 입력 가능하게: 6자리 숫자 또는 영문 티커
+    raw = q.upper()
+    if raw not in set(out["Code"].str.upper()):
+        if (raw.isdigit() and len(raw) == 6) or (raw.isascii() and raw.isalpha() and 1 <= len(raw) <= 5):
+            direct = pd.DataFrame([(raw, raw, "코드 직접 입력")], columns=["Code", "Name", "Market"])
+            out = pd.concat([out, direct], ignore_index=True)
+    return out
+
+
+def price_note(code: str) -> str | None:
+    if is_foreign(code):
+        return "미국 종목은 달러 가격을 일별 원/달러 환율로 원화 환산해 계산했습니다 (환율 변동 포함)."
+    return None
 
 
 def load_prices(code: str, start: str, end: str) -> pd.DataFrame:
     df = fdr.DataReader(code, start, end)
     df = df[["Open", "High", "Low", "Close", "Volume"]].dropna()
     df = df[(df[["Open", "High", "Low", "Close"]] > 0).all(axis=1)]  # 거래정지일 제거
+    if is_foreign(code) and not df.empty:
+        try:
+            fx = fdr.DataReader("USD/KRW", start, end)["Close"]
+        except Exception as e:  # noqa: BLE001
+            raise RuntimeError(f"원/달러 환율을 불러오지 못했습니다: {e}") from e
+        fx = fx[fx > 0].reindex(df.index.union(fx.index)).ffill().bfill().reindex(df.index)
+        df[["Open", "High", "Low", "Close"]] = df[["Open", "High", "Low", "Close"]].mul(fx, axis=0)
     return df
 
 

@@ -87,30 +87,25 @@ def fmt_pct(v):
 # ---------------------------------------------------------------------------
 st.sidebar.header("설정")
 
-listing, listing_err = None, None
+listing, listing_errs = None, []
 try:
-    listing = get_listing()
+    listing, listing_errs = get_listing()
 except Exception as e:  # noqa: BLE001
-    listing_err = str(e)
+    listing_errs = [str(e)]
 
 code, name = None, None
-if listing is not None:
-    q = st.sidebar.text_input("종목 검색", placeholder="종목명 또는 코드 (예: 현대차, 005380)")
-    if q:
-        hits = core.search_listing(listing, q)
-        if hits.empty:
-            st.sidebar.caption("검색 결과가 없습니다.")
-        else:
-            labels = [f"{r.Name}  ({r.Code} · {r.Market})" for r in hits.itertuples()]
-            i = st.sidebar.selectbox("검색 결과", range(len(labels)), format_func=lambda k: labels[k])
-            code, name = hits.loc[i, "Code"], hits.loc[i, "Name"]
-else:
-    st.sidebar.warning("종목 목록을 불러오지 못했습니다. 6자리 종목코드를 직접 입력하세요.")
-    with st.sidebar.expander("오류 내용"):
-        st.code(listing_err)
-    raw = st.sidebar.text_input("종목코드", placeholder="005380")
-    if raw.strip().isdigit() and len(raw.strip()) == 6:
-        code = name = raw.strip()
+q = st.sidebar.text_input("종목 · ETF 검색", placeholder="예: 현대차, 005380, 나스닥100, S&P500, QQQ")
+if listing_errs:
+    st.sidebar.caption("⚠️ 불러오지 못한 목록: " + ", ".join(listing_errs) + " — 종목코드(6자리)나 티커를 직접 입력하면 됩니다.")
+if q:
+    hits = core.search_listing(listing, q) if listing is not None else core.search_listing(
+        pd.DataFrame(columns=["Code", "Name", "Market", "_key"]), q)
+    if hits.empty:
+        st.sidebar.caption("검색 결과가 없습니다.")
+    else:
+        labels = [f"{r.Name}  ({r.Code} · {r.Market})" for r in hits.itertuples()]
+        i = st.sidebar.selectbox("검색 결과", range(len(labels)), format_func=lambda k: labels[k])
+        code, name = hits.loc[i, "Code"], hits.loc[i, "Name"]
 
 today = date.today()
 start = st.sidebar.date_input("시작일", today - timedelta(days=365 * 3), max_value=today)
@@ -148,18 +143,20 @@ if run:
                 with open(res["plot"], encoding="utf-8") as f:
                     plot_html = f.read()
             st.session_state["result"] = dict(res=res, name=name, code=code, strategy=info["name"],
-                                              bars=len(df), plot_html=plot_html)
+                                              bars=len(df), plot_html=plot_html, note=core.price_note(code))
         except Exception as e:  # noqa: BLE001
             st.error(f"실행 실패: {e}")
 
 r = st.session_state.get("result")
 if not r:
-    st.info("왼쪽에서 종목을 검색해 선택하고 **백테스트 실행**을 누르세요. (모바일은 왼쪽 위 ☰ 메뉴)")
+    st.info("왼쪽에서 종목이나 ETF를 검색해 선택하고 **백테스트 실행**을 누르세요. (모바일은 왼쪽 위 ☰ 메뉴)")
     st.stop()
 
 s = r["res"]["summary"]
 st.subheader(f"{r['name']} ({r['code']}) · {r['strategy']}")
 st.caption(f"{s.get('Start')} ~ {s.get('End')} · {r['bars']}거래일")
+if r.get("note"):
+    st.info(r["note"])
 
 k = st.columns(4)
 k[0].metric("전략 수익률", fmt_pct(s.get("Return [%]")))
