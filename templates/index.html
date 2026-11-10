@@ -1,0 +1,376 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>주식 백테스트</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #f5f6f8; --card: #ffffff; --text: #1b1f24; --muted: #6b7380; --line: #e3e6ea;
+    --accent: #2f6fed; --accent-weak: #e8effd;
+    --up: #d63b3b; --down: #2463d1;   /* 한국식: 상승 빨강, 하락 파랑 */
+    --bh: #9aa3ad;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #121417; --card: #1b1e23; --text: #e8eaed; --muted: #98a0aa; --line: #2c3037;
+      --accent: #6b9bff; --accent-weak: #1f2a40; --up: #ff6b6b; --down: #5c9bff; --bh: #6b7380;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #121417; --card: #1b1e23; --text: #e8eaed; --muted: #98a0aa; --line: #2c3037;
+    --accent: #6b9bff; --accent-weak: #1f2a40; --up: #ff6b6b; --down: #5c9bff; --bh: #6b7380;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font-family: "Noto Sans KR", system-ui, sans-serif; font-size: 15px; }
+  header { padding: 20px 16px 4px; max-width: 1200px; margin: 0 auto; }
+  header h1 { margin: 0; font-size: 22px; }
+  header p { margin: 4px 0 0; color: var(--muted); font-size: 13px; }
+  main { max-width: 1200px; margin: 0 auto; padding: 16px; display: grid;
+         grid-template-columns: 340px 1fr; gap: 16px; align-items: start; }
+  main > *, .stack > * { min-width: 0; }
+  @media (max-width: 860px) { main { grid-template-columns: 1fr; } }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; }
+  .card h2 { font-size: 15px; margin: 0 0 12px; }
+  label { display: block; font-size: 13px; color: var(--muted); margin: 10px 0 4px; }
+  input, select { width: 100%; padding: 9px 10px; border: 1px solid var(--line); border-radius: 8px;
+                  background: var(--bg); color: var(--text); font: inherit; }
+  input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  .row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px; }
+  input[type="date"] { min-width: 0; }
+  .search { position: relative; }
+  .results { position: absolute; z-index: 10; left: 0; right: 0; top: 100%; margin-top: 4px;
+             background: var(--card); border: 1px solid var(--line); border-radius: 8px;
+             max-height: 280px; overflow: auto; display: none; box-shadow: 0 6px 20px rgba(0,0,0,.12); }
+  .results div { padding: 8px 10px; cursor: pointer; display: flex; justify-content: space-between; gap: 8px; }
+  .results div:hover, .results div.active { background: var(--accent-weak); }
+  .results small { color: var(--muted); }
+  .picked { margin-top: 8px; padding: 8px 10px; border-radius: 8px; background: var(--accent-weak);
+            font-weight: 500; display: none; }
+  .picked small { color: var(--muted); font-weight: 400; }
+  .desc { font-size: 12px; color: var(--muted); margin: 6px 0 0; line-height: 1.5; }
+  button { margin-top: 16px; width: 100%; padding: 11px; border: 0; border-radius: 8px;
+           background: var(--accent); color: #fff; font: inherit; font-weight: 700; cursor: pointer; }
+  button:disabled { opacity: .5; cursor: wait; }
+  .msg { margin-top: 10px; font-size: 13px; color: var(--up); min-height: 1em; }
+  .kpis { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+  .kpi { background: var(--bg); border-radius: 10px; padding: 10px 12px; }
+  .kpi .k { font-size: 12px; color: var(--muted); }
+  .kpi .v { font-size: 20px; font-weight: 700; margin-top: 2px; }
+  .up { color: var(--up); } .down { color: var(--down); }
+  .chart-wrap { position: relative; height: 320px; margin-top: 16px; }
+  .table-wrap { overflow-x: auto; margin-top: 8px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; white-space: nowrap; }
+  th, td { padding: 7px 8px; border-bottom: 1px solid var(--line); text-align: right; }
+  th:first-child, td:first-child { text-align: left; }
+  th { color: var(--muted); font-weight: 500; }
+  .empty { color: var(--muted); text-align: center; padding: 60px 0; }
+  .stack { display: grid; gap: 16px; }
+  a { color: var(--accent); }
+  iframe { width: 100%; height: 700px; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
+  details summary { cursor: pointer; font-weight: 500; }
+</style>
+</head>
+<body>
+<header>
+  <h1>📈 주식 백테스트</h1>
+  <p>FinanceDataReader 시세 + backtesting.py 엔진 · 과거 성과가 미래 수익을 보장하지 않습니다.</p>
+</header>
+
+<main>
+  <!-- 설정 -->
+  <section class="card">
+    <h2>설정</h2>
+
+    <label for="q">종목 검색</label>
+    <div class="search">
+      <input id="q" placeholder="종목명 또는 코드 (예: 현대차, 005380)" autocomplete="off">
+      <div class="results" id="results"></div>
+    </div>
+    <div class="picked" id="picked"></div>
+
+    <div class="row">
+      <div><label for="start">시작일</label><input type="date" id="start"></div>
+      <div><label for="end">종료일</label><input type="date" id="end"></div>
+    </div>
+    <div class="row">
+      <div><label for="cash">초기 자금(원)</label><input type="number" id="cash" value="10000000" step="1000000"></div>
+      <div><label for="commission">거래비용(편도 %)</label><input type="number" id="commission" value="0.1" step="0.01"></div>
+    </div>
+
+    <label for="strategy">전략</label>
+    <select id="strategy">
+      <option value="split">분할 익절 + 추적 손절</option>
+      <option value="sma">이동평균 골든/데드크로스</option>
+      <option value="rsi">RSI 역추세</option>
+      <option value="buyhold">매수 후 보유 (비교용)</option>
+    </select>
+    <p class="desc" id="strategyDesc"></p>
+    <div id="params"></div>
+
+    <button id="run">백테스트 실행</button>
+    <div class="msg" id="msg"></div>
+  </section>
+
+  <!-- 결과 -->
+  <section class="stack">
+    <div class="card" id="resultCard">
+      <h2 id="resultTitle">결과</h2>
+      <div class="empty" id="empty">종목을 검색해 선택한 뒤 백테스트를 실행하세요.</div>
+      <div id="result" hidden>
+        <div class="kpis" id="kpis"></div>
+        <div class="chart-wrap"><canvas id="chart"></canvas></div>
+      </div>
+    </div>
+
+    <div class="card" id="tradesCard" hidden>
+      <h2>거래 내역 <small id="tradeCount" style="color:var(--muted);font-weight:400"></small></h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>매수일</th><th>매도일</th><th>수량</th><th>매수가</th><th>매도가</th><th>손익(원)</th><th>수익률</th></tr></thead>
+          <tbody id="trades"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card" id="plotCard" hidden>
+      <details>
+        <summary>backtesting.py 상세 차트 (캔들 · 매매 시점 · 지표)</summary>
+        <p class="desc"><a id="plotLink" target="_blank" rel="noopener">새 창에서 열기 ↗</a></p>
+        <iframe id="plotFrame" title="상세 차트" loading="lazy"></iframe>
+      </details>
+    </div>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+
+// ---------------- 전략 정의 (app.py 의 클래스 변수와 이름이 같아야 함) ----------------
+const STRATS = {
+  split: {
+    desc: "시작일에 매수 → +1차% 에서 일부, +2차% 에서 일부 익절 → 1차 익절 후엔 고점 대비 추적손절%, 진입가 대비 손절% 하락 시 전량 매도. 재진입을 켜면 청산 후 골든크로스에서 다시 매수.",
+    params: [
+      ["tp1", "1차 익절 (%)", 20], ["p1", "1차 매도 비중 (%)", 30],
+      ["tp2", "2차 익절 (%)", 40], ["p2", "2차 매도 비중 (%)", 30],
+      ["trail", "추적 손절 (고점 대비 %)", 10], ["stop", "손절 (진입가 대비 %)", 10],
+      ["reentry", "골든크로스 재진입 (1=켬, 0=끔)", 1],
+      ["n1", "단기 이평 (일)", 20], ["n2", "장기 이평 (일)", 60],
+    ],
+  },
+  sma: {
+    desc: "단기 이동평균이 장기 이동평균을 위로 뚫으면 매수, 아래로 뚫으면 매도.",
+    params: [["n1", "단기 이평 (일)", 20], ["n2", "장기 이평 (일)", 60]],
+  },
+  rsi: {
+    desc: "RSI 가 과매도선을 위로 넘어서면 매수, 과매수선 이상이면 매도.",
+    params: [["n", "RSI 기간 (일)", 14], ["lower", "과매도선", 30], ["upper", "과매수선", 70]],
+  },
+  buyhold: { desc: "첫날 전액 매수 후 끝까지 보유. 다른 전략과 비교하는 기준선.", params: [] },
+};
+
+function renderParams() {
+  const s = STRATS[$("strategy").value];
+  $("strategyDesc").textContent = s.desc;
+  const box = $("params");
+  box.innerHTML = "";
+  for (let i = 0; i < s.params.length; i += 2) {
+    const row = document.createElement("div");
+    row.className = "row";
+    for (const [key, label, def] of s.params.slice(i, i + 2)) {
+      const d = document.createElement("div");
+      d.innerHTML = `<label for="p_${key}"></label><input type="number" step="any" id="p_${key}" data-key="${key}">`;
+      d.querySelector("label").textContent = label;
+      d.querySelector("input").value = def;
+      row.appendChild(d);
+    }
+    box.appendChild(row);
+  }
+}
+$("strategy").addEventListener("change", renderParams);
+renderParams();
+
+// ---------------- 기본 날짜: 최근 3년 ----------------
+const today = new Date();
+const iso = (d) => d.toISOString().slice(0, 10);
+$("end").value = iso(today);
+$("start").value = iso(new Date(today.getFullYear() - 3, today.getMonth(), today.getDate()));
+
+// ---------------- 종목 검색 ----------------
+let picked = null, timer = null, items = [], activeIdx = -1;
+const results = $("results");
+
+$("q").addEventListener("input", () => {
+  clearTimeout(timer);
+  const q = $("q").value.trim();
+  if (!q) { results.style.display = "none"; return; }
+  timer = setTimeout(() => search(q), 200);
+});
+$("q").addEventListener("keydown", (e) => {
+  if (results.style.display !== "block") return;
+  if (e.key === "ArrowDown") { activeIdx = Math.min(activeIdx + 1, items.length - 1); paintActive(); e.preventDefault(); }
+  else if (e.key === "ArrowUp") { activeIdx = Math.max(activeIdx - 1, 0); paintActive(); e.preventDefault(); }
+  else if (e.key === "Enter" && items[activeIdx]) { pick(items[activeIdx]); e.preventDefault(); }
+  else if (e.key === "Escape") { results.style.display = "none"; }
+});
+document.addEventListener("click", (e) => { if (!e.target.closest(".search")) results.style.display = "none"; });
+
+async function search(q) {
+  results.innerHTML = '<div><small>검색 중… (처음엔 종목 목록을 내려받느라 몇 초 걸려요)</small></div>';
+  results.style.display = "block";
+  try {
+    const r = await fetch("/api/search?q=" + encodeURIComponent(q));
+    const data = await r.json();
+    if (data.error) throw new Error(data.error);
+    items = data; activeIdx = data.length ? 0 : -1;
+    results.innerHTML = "";
+    if (!data.length) { results.innerHTML = "<div><small>검색 결과가 없습니다</small></div>"; return; }
+    data.forEach((it, i) => {
+      const row = document.createElement("div");
+      row.innerHTML = "<span></span><small></small>";
+      row.children[0].textContent = it.Name;
+      row.children[1].textContent = `${it.Code} · ${it.Market}`;
+      row.addEventListener("click", () => pick(it));
+      row.addEventListener("mouseenter", () => { activeIdx = i; paintActive(); });
+      results.appendChild(row);
+    });
+    paintActive();
+  } catch (err) {
+    results.innerHTML = "";
+    const d = document.createElement("div");
+    d.textContent = "검색 실패: " + err.message;
+    results.appendChild(d);
+  }
+}
+function paintActive() {
+  [...results.children].forEach((el, i) => el.classList.toggle("active", i === activeIdx));
+}
+function pick(it) {
+  picked = it;
+  $("q").value = it.Name;
+  results.style.display = "none";
+  const p = $("picked");
+  p.style.display = "block";
+  p.innerHTML = "✔ <span></span> <small></small>";
+  p.children[0].textContent = it.Name;
+  p.children[1].textContent = `${it.Code} · ${it.Market}`;
+}
+
+// ---------------- 실행 ----------------
+let chart;
+const won = (v) => v == null ? "-" : Math.round(v).toLocaleString("ko-KR");
+const pct = (v) => v == null ? "-" : (v > 0 ? "+" : "") + v.toFixed(2) + "%";
+const signCls = (v) => v == null ? "" : v > 0 ? "up" : v < 0 ? "down" : "";
+
+$("run").addEventListener("click", async () => {
+  $("msg").textContent = "";
+  if (!picked) { $("msg").textContent = "먼저 종목을 검색해서 선택하세요."; return; }
+  const params = {};
+  document.querySelectorAll("#params input").forEach((el) => params[el.dataset.key] = el.value);
+  const body = {
+    code: picked.Code, strategy: $("strategy").value,
+    start: $("start").value, end: $("end").value,
+    cash: $("cash").value, commission: $("commission").value, params,
+  };
+  $("run").disabled = true; $("run").textContent = "계산 중…";
+  try {
+    const r = await fetch("/api/backtest", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    });
+    const data = await r.json();
+    if (!r.ok || data.error) throw new Error(data.error || r.statusText);
+    render(data);
+  } catch (err) {
+    $("msg").textContent = err.message;
+  } finally {
+    $("run").disabled = false; $("run").textContent = "백테스트 실행";
+  }
+});
+
+function render(d) {
+  const s = d.summary;
+  $("empty").hidden = true; $("result").hidden = false;
+  $("resultTitle").textContent =
+    `${picked.Name} · ${$("strategy").selectedOptions[0].text} · ${s.Start} ~ ${s.End} (${d.bars}거래일)`;
+
+  const kpis = [
+    ["전략 수익률", pct(s["Return [%]"]), signCls(s["Return [%]"])],
+    ["단순 보유 수익률", pct(s["Buy & Hold Return [%]"]), signCls(s["Buy & Hold Return [%]"])],
+    ["연환산 수익률", pct(s["Return (Ann.) [%]"]), signCls(s["Return (Ann.) [%]"])],
+    ["최대 낙폭 (MDD)", pct(s["Max. Drawdown [%]"]), "down"],
+    ["최종 자산(원)", won(s["Equity Final [$]"]), ""],
+    ["거래 횟수", s["# Trades"] ?? "-", ""],
+    ["승률", s["Win Rate [%]"] == null ? "-" : s["Win Rate [%]"].toFixed(1) + "%", ""],
+    ["샤프 지수", s["Sharpe Ratio"] == null ? "-" : s["Sharpe Ratio"].toFixed(2), ""],
+    ["보유 기간 비중", s["Exposure Time [%]"] == null ? "-" : s["Exposure Time [%]"].toFixed(1) + "%", ""],
+  ];
+  $("kpis").innerHTML = "";
+  for (const [k, v, cls] of kpis) {
+    const el = document.createElement("div");
+    el.className = "kpi";
+    el.innerHTML = `<div class="k"></div><div class="v ${cls}"></div>`;
+    el.children[0].textContent = k; el.children[1].textContent = v;
+    $("kpis").appendChild(el);
+  }
+
+  // 자산 곡선
+  const css = getComputedStyle(document.documentElement);
+  const c = (n) => css.getPropertyValue(n).trim();
+  if (chart) chart.destroy();
+  if (typeof Chart === "undefined") {
+    $("chart").parentElement.innerHTML = '<p class="desc">차트 라이브러리(Chart.js)를 불러오지 못해 자산 곡선을 표시할 수 없습니다. 인터넷 연결을 확인하세요.</p>';
+  } else chart = new Chart($("chart"), {
+    type: "line",
+    data: {
+      labels: d.curve.dates,
+      datasets: [
+        { label: "전략 자산", data: d.curve.equity, borderColor: c("--accent"), borderWidth: 2, pointRadius: 0, tension: 0 },
+        { label: "단순 보유", data: d.curve.buyhold, borderColor: c("--bh"), borderWidth: 1.5, borderDash: [4, 3], pointRadius: 0, tension: 0 },
+      ],
+    },
+    options: {
+      maintainAspectRatio: false, interaction: { mode: "index", intersect: false },
+      plugins: {
+        legend: { labels: { color: c("--text") } },
+        tooltip: { callbacks: { label: (ctx) => `${ctx.dataset.label}: ${won(ctx.parsed.y)}원` } },
+      },
+      scales: {
+        x: { ticks: { color: c("--muted"), maxTicksLimit: 8 }, grid: { color: c("--line") } },
+        y: { ticks: { color: c("--muted"), callback: (v) => (v / 10000).toLocaleString("ko-KR") + "만" }, grid: { color: c("--line") } },
+      },
+    },
+  });
+
+  // 거래 내역
+  $("tradesCard").hidden = false;
+  $("tradeCount").textContent = `${d.trades.length}건`;
+  const tb = $("trades"); tb.innerHTML = "";
+  if (!d.trades.length) tb.innerHTML = '<tr><td colspan="7" style="text-align:center">거래 없음</td></tr>';
+  for (const t of d.trades) {
+    const tr = document.createElement("tr");
+    const cells = [t.entryTime, t.exitTime ?? "보유 중", t.size, won(t.entryPrice), won(t.exitPrice), won(t.pnl), pct(t.returnPct)];
+    cells.forEach((v, i) => {
+      const td = document.createElement("td");
+      td.textContent = v;
+      if (i >= 5) td.className = signCls(t.pnl);
+      tr.appendChild(td);
+    });
+    tb.appendChild(tr);
+  }
+
+  // 상세 차트
+  if (d.plotUrl) {
+    $("plotCard").hidden = false;
+    $("plotLink").href = d.plotUrl;
+    $("plotFrame").src = d.plotUrl;
+  } else {
+    $("plotCard").hidden = true;
+  }
+}
+</script>
+</body>
+</html>
