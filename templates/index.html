@@ -320,6 +320,28 @@ function render(d) {
   // 자산 곡선
   const css = getComputedStyle(document.documentElement);
   const c = (n) => css.getPropertyValue(n).trim();
+  // 거래 내역 → 자산 곡선 위 매수/매도 점 (같은 날 여러 건은 합침)
+  const eqAt = new Map(d.curve.dates.map((dt, i) => [dt, d.curve.equity[i]]));
+  const group = (rows) => {
+    const m = new Map();
+    for (const r of rows) {
+      if (!r.date || !eqAt.has(r.date)) continue;
+      const g = m.get(r.date) || { x: r.date, y: eqAt.get(r.date), size: 0, cost: 0, rets: [] };
+      g.size += r.size; g.cost += r.price * r.size; if (r.ret != null) g.rets.push(r.ret);
+      m.set(r.date, g);
+    }
+    return [...m.values()].map((g) => ({ ...g, price: g.cost / g.size,
+      ret: g.rets.length ? g.rets.reduce((a, b) => a + b, 0) / g.rets.length : null }));
+  };
+  const marks = {
+    buy: group(d.trades.map((t) => ({ date: t.entryTime, price: t.entryPrice, size: t.size }))),
+    sell: group(d.trades.map((t) => ({ date: t.exitTime, price: t.exitPrice, size: t.size, ret: t.returnPct }))),
+  };
+  const markerSet = (label, data, color, rotation) => ({
+    type: "scatter", label, data, showLine: false, pointStyle: "triangle", rotation,
+    pointRadius: 7, pointHoverRadius: 9, backgroundColor: color, borderColor: "#fff", borderWidth: 1,
+  });
+
   if (chart) chart.destroy();
   if (typeof Chart === "undefined") {
     $("chart").parentElement.innerHTML = '<p class="desc">차트 라이브러리(Chart.js)를 불러오지 못해 자산 곡선을 표시할 수 없습니다. 인터넷 연결을 확인하세요.</p>';
@@ -330,13 +352,29 @@ function render(d) {
       datasets: [
         { label: "전략 자산", data: d.curve.equity, borderColor: c("--accent"), borderWidth: 2, pointRadius: 0, tension: 0 },
         { label: "단순 보유", data: d.curve.buyhold, borderColor: c("--bh"), borderWidth: 1.5, borderDash: [4, 3], pointRadius: 0, tension: 0 },
+        markerSet("매수", marks.buy, c("--up"), 0),
+        markerSet("매도", marks.sell, c("--down"), 180),
       ],
     },
     options: {
       maintainAspectRatio: false, interaction: { mode: "index", intersect: false },
       plugins: {
-        legend: { labels: { color: c("--text") } },
-        tooltip: { callbacks: { label: (ctx) => `${ctx.dataset.label}: ${won(ctx.parsed.y)}원` } },
+        legend: { labels: { color: c("--text"), usePointStyle: true } },
+        tooltip: {
+          // 매수/매도 점은 index 모드에서 엉뚱한 날짜와 묶이므로 빼고, 그날 거래는 아래에 따로 표시
+          filter: (item) => item.dataset.type !== "scatter",
+          callbacks: {
+            label: (ctx) => `${ctx.dataset.label}: ${won(ctx.parsed.y)}원`,
+            afterBody: (items) => {
+              const day = items[0] && items[0].label, out = [];
+              for (const [name, list] of [["▲ 매수", marks.buy], ["▼ 매도", marks.sell]]) {
+                const g = list.find((m) => m.x === day);
+                if (g) out.push(`${name} ${g.size}주 @ ${won(g.price)}원` + (g.ret != null ? ` (${pct(g.ret)})` : ""));
+              }
+              return out;
+            },
+          },
+        },
       },
       scales: {
         x: { ticks: { color: c("--muted"), maxTicksLimit: 8 }, grid: { color: c("--line") } },

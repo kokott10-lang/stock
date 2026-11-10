@@ -7,6 +7,7 @@ import os
 import tempfile
 from datetime import date, timedelta
 
+import altair as alt
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
@@ -24,6 +25,57 @@ def get_listing():
 @st.cache_data(ttl=60 * 60, show_spinner="시세 불러오는 중…")
 def get_prices(code, start, end):
     return core.load_prices(code, start, end)
+
+
+def trade_markers(curve: pd.DataFrame, trades: pd.DataFrame) -> pd.DataFrame:
+    """거래 내역 → 자산 곡선 위에 찍을 매수/매도 점 (같은 날 여러 건은 하나로 합침)"""
+    rows = []
+    for _, t in trades.iterrows():
+        rows.append(("매수", t["매수일"], t["매수가"], t["수량"], None))
+        if isinstance(t["매도일"], str):
+            rows.append(("매도", t["매도일"], t["매도가"], t["수량"], t["수익률(%)"]))
+    if not rows:
+        return pd.DataFrame(columns=["날짜", "구분", "자산", "가격", "수량", "수익률(%)"])
+    m = pd.DataFrame(rows, columns=["구분", "날짜", "가격", "수량", "수익률(%)"])
+    m["날짜"] = pd.to_datetime(m["날짜"])
+    m = (m.groupby(["날짜", "구분"], as_index=False)
+          .agg(가격=("가격", "mean"), 수량=("수량", "sum"), **{"수익률(%)": ("수익률(%)", "mean")}))
+    eq = curve["Equity"]
+    m["자산"] = eq.reindex(m["날짜"], method="ffill").values
+    return m
+
+
+def equity_chart(curve: pd.DataFrame, trades: pd.DataFrame) -> alt.Chart:
+    line_df = (curve[["Equity", "BuyHold"]]
+               .rename(columns={"Equity": "전략 자산", "BuyHold": "단순 보유"})
+               .rename_axis("날짜").reset_index()
+               .melt("날짜", var_name="구분", value_name="자산"))
+    lines = alt.Chart(line_df).mark_line(strokeWidth=1.8).encode(
+        x=alt.X("날짜:T", title=None),
+        y=alt.Y("자산:Q", title="자산(원)", axis=alt.Axis(format=",.0f"), scale=alt.Scale(zero=False)),
+        color=alt.Color("구분:N", title=None,
+                        scale=alt.Scale(domain=["전략 자산", "단순 보유"], range=["#2f6fed", "#9aa3ad"]),
+                        legend=alt.Legend(orient="top")),
+        strokeDash=alt.StrokeDash("구분:N", legend=None,
+                                  scale=alt.Scale(domain=["전략 자산", "단순 보유"], range=[[1, 0], [4, 3]])),
+        tooltip=[alt.Tooltip("날짜:T", format="%Y-%m-%d"), "구분:N",
+                 alt.Tooltip("자산:Q", format=",.0f")],
+    )
+    m = trade_markers(curve, trades)
+    if m.empty:
+        return lines.properties(height=380)
+    pts = alt.Chart(m).mark_point(filled=True, size=110, opacity=0.95, stroke="white", strokeWidth=0.8).encode(
+        x="날짜:T",
+        y="자산:Q",
+        shape=alt.Shape("구분:N", scale=alt.Scale(domain=["매수", "매도"],
+                                                  range=["triangle-up", "triangle-down"]), legend=None),
+        fill=alt.Fill("구분:N", scale=alt.Scale(domain=["매수", "매도"], range=["#d63b3b", "#2463d1"]),
+                      legend=alt.Legend(orient="top", title=None)),
+        tooltip=[alt.Tooltip("날짜:T", format="%Y-%m-%d"), "구분:N",
+                 alt.Tooltip("가격:Q", format=",.0f", title="가격(원)"), alt.Tooltip("수량:Q", title="수량(주)"),
+                 alt.Tooltip("수익률(%):Q", format="+.2f")],
+    )
+    return alt.layer(lines, pts).resolve_scale(color="independent").properties(height=380).interactive(bind_y=False)
 
 
 def fmt_pct(v):
@@ -121,11 +173,12 @@ wr, sh = s.get("Win Rate [%]"), s.get("Sharpe Ratio")
 k[2].metric("승률", "-" if wr is None else f"{wr:.1f}%")
 k[3].metric("샤프 지수", "-" if sh is None else f"{sh:.2f}")
 
-st.markdown("#### 자산 곡선")
-curve = r["res"]["curve"][["Equity", "BuyHold"]].rename(columns={"Equity": "전략 자산", "BuyHold": "단순 보유"})
-st.line_chart(curve, color=["#2f6fed", "#9aa3ad"])
-
 trades = r["res"]["trades"]
+
+st.markdown("#### 자산 곡선")
+st.altair_chart(equity_chart(r["res"]["curve"], trades), use_container_width=True)
+st.caption("▲ 빨강 = 매수, ▼ 파랑 = 매도 · 점에 마우스를 올리면 거래 내용이 보입니다.")
+
 st.markdown(f"#### 거래 내역 ({len(trades)}건)")
 st.dataframe(
     trades,
