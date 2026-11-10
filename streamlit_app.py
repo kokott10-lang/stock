@@ -217,6 +217,86 @@ st.dataframe(
     },
 )
 
+# ---------------------------------------------------------------------------
+# 투자기간 분석
+# ---------------------------------------------------------------------------
+st.markdown("#### 투자기간 분석")
+curve_all = r["res"]["curve"]
+COLORS = alt.Scale(domain=["전략", "단순 보유"], range=["#2f6fed", "#9aa3ad"])
+tab1, tab2, tab3 = st.tabs(["보유기간별", "연도별", "매수 시점별"])
+
+with tab1:
+    ht = core.horizon_table(curve_all)
+    if ht.empty:
+        st.info("기간이 너무 짧아 분석할 수 없습니다. 시작일을 앞당겨 보세요.")
+    else:
+        st.caption("기간 안의 **모든 날짜에 샀다고 가정**하고, 정해진 기간만큼 보유했을 때의 수익률 분포입니다. "
+                   "막대는 최저~최고, 점은 중앙값입니다.")
+        order = [h for h, _ in core.HORIZONS if h in set(ht["보유기간"])]
+        base = alt.Chart(ht).encode(
+            x=alt.X("보유기간:N", sort=order, title=None, axis=alt.Axis(labelAngle=0)),
+            xOffset=alt.XOffset("구분:N", sort=["전략", "단순 보유"]),
+            color=alt.Color("구분:N", scale=COLORS, legend=alt.Legend(orient="top", title=None)),
+        )
+        tips = ["보유기간", "구분", alt.Tooltip("중앙값(%):Q", format="+.1f"),
+                alt.Tooltip("최저(%):Q", format="+.1f"), alt.Tooltip("최고(%):Q", format="+.1f"),
+                alt.Tooltip("플러스 확률(%):Q", format=".0f")]
+        rng = base.mark_rule(strokeWidth=6, opacity=0.35).encode(
+            y=alt.Y("최저(%):Q", title="수익률(%)"), y2="최고(%):Q", tooltip=tips)
+        med = base.mark_point(filled=True, size=90).encode(y="중앙값(%):Q", tooltip=tips)
+        zero = alt.Chart(pd.DataFrame({"y": [0]})).mark_rule(color="#999", strokeDash=[3, 3]).encode(y=alt.Y("y:Q", title="수익률(%)"))
+        st.altair_chart((rng + med + zero).properties(height=340), use_container_width=True)
+
+        if not any(h in order for h in ("3년", "5년")):
+            st.caption("💡 3년·5년 보유 분석을 보려면 시작일을 더 앞으로 당겨 보세요.")
+        st.dataframe(
+            ht, hide_index=True, use_container_width=True,
+            column_config={c: st.column_config.NumberColumn(format="%.1f")
+                           for c in ht.columns if c.endswith("(%)")},
+        )
+
+with tab2:
+    yt = core.yearly_table(curve_all)
+    st.caption("달력 기준 연도별 수익률입니다. 첫해와 마지막 해는 데이터가 있는 기간만 계산합니다.")
+    ylong = yt.melt("연도", value_vars=["전략", "단순 보유"], var_name="구분", value_name="수익률(%)")
+    bars = alt.Chart(ylong).mark_bar().encode(
+        x=alt.X("연도:O", title=None, axis=alt.Axis(labelAngle=0)),
+        xOffset=alt.XOffset("구분:N", sort=["전략", "단순 보유"]),
+        y=alt.Y("수익률(%):Q"),
+        color=alt.Color("구분:N", scale=COLORS, legend=alt.Legend(orient="top", title=None)),
+        tooltip=["연도:O", "구분:N", alt.Tooltip("수익률(%):Q", format="+.2f")],
+    )
+    st.altair_chart(bars.properties(height=300), use_container_width=True)
+    st.dataframe(yt, hide_index=True, use_container_width=True,
+                 column_config={c: st.column_config.NumberColumn(format="%+.2f") for c in ["전략", "단순 보유", "차이(%p)"]})
+
+with tab3:
+    avail = [(h, d) for h, d in core.HORIZONS if len(curve_all) >= d + core.MIN_SAMPLES]
+    if not avail:
+        st.info("기간이 너무 짧아 분석할 수 없습니다.")
+    else:
+        labels = [h for h, _ in avail]
+        h = st.selectbox("보유기간", labels, index=labels.index("1년") if "1년" in labels else len(labels) - 1)
+        days = dict(avail)[h]
+        rf = core.rolling_frame(curve_all, days)
+        st.caption(f"x축 날짜에 사서 **{h}** 보유했다면 얻었을 수익률입니다. 0선 아래는 손실 구간입니다.")
+        long = rf.rename_axis("매수일").reset_index().melt("매수일", var_name="구분", value_name="수익률(%)")
+        line = alt.Chart(long).mark_line(strokeWidth=1.6).encode(
+            x=alt.X("매수일:T", title="매수일"),
+            y=alt.Y("수익률(%):Q", title="수익률(%)"),
+            color=alt.Color("구분:N", scale=COLORS, legend=alt.Legend(orient="top", title=None)),
+            tooltip=[alt.Tooltip("매수일:T", format="%Y-%m-%d"), "구분:N",
+                     alt.Tooltip("수익률(%):Q", format="+.2f")],
+        )
+        zero = alt.Chart(pd.DataFrame({"y": [0]})).mark_rule(color="#999", strokeDash=[3, 3]).encode(y=alt.Y("y:Q", title="수익률(%)"))
+        st.altair_chart((line + zero).properties(height=320).interactive(bind_y=False), use_container_width=True)
+        c = st.columns(3)
+        c[0].metric(f"전략 {h} 플러스 확률", f"{(rf['전략'] > 0).mean() * 100:.0f}%")
+        c[1].metric(f"단순 보유 {h} 플러스 확률", f"{(rf['단순 보유'] > 0).mean() * 100:.0f}%")
+        c[2].metric("전략이 더 나았던 비율", f"{(rf['전략'] > rf['단순 보유']).mean() * 100:.0f}%")
+
+st.caption("※ 전략의 기간별 수익률은 전체 백테스트 자산 곡선에서 잘라 계산한 값이라, 그 날짜에 전략을 새로 시작한 결과와는 조금 다를 수 있습니다.")
+
 if r["plot_html"]:
     with st.expander("backtesting.py 상세 차트 (캔들 · 매매 시점 · 지표)"):
         components.html(r["plot_html"], height=820, scrolling=True)

@@ -489,3 +489,69 @@ def run_backtest(df: pd.DataFrame, strategy: str, cash: float, commission_pct: f
             log.warning("상세 차트 생성 실패: %s", e)
 
     return {"summary": summary, "curve": curve, "trades": trades, "plot": plot}
+
+
+# ---------------------------------------------------------------------------
+# 투자기간 분석
+# ---------------------------------------------------------------------------
+MIN_SAMPLES = 20  # 시작일이 이보다 적으면 그 보유기간은 분석에서 제외
+
+HORIZONS = [  # (이름, 거래일 수)
+    ("1개월", 21), ("3개월", 63), ("6개월", 126), ("1년", 252),
+    ("2년", 504), ("3년", 756), ("5년", 1260), ("10년", 2520),
+]
+
+
+def rolling_returns(series: pd.Series, days: int) -> pd.Series:
+    """각 날짜에 시작해 days 거래일 보유했을 때의 수익률(%) — 인덱스는 시작일"""
+    return (series.shift(-days) / series - 1).dropna() * 100
+
+
+def horizon_table(curve: pd.DataFrame) -> pd.DataFrame:
+    """
+    보유기간별 수익률 분포. 데이터 안의 모든 시작일에 대해 계산.
+    (전략은 백테스트 전체 자산곡선의 구간 수익률 — 그 시점에 전략을 새로 시작한 것과는 약간 다를 수 있음)
+    """
+    rows = []
+    for label, days in HORIZONS:
+        if len(curve) < days + MIN_SAMPLES:
+            continue
+        for col, who in (("Equity", "전략"), ("BuyHold", "단순 보유")):
+            r = rolling_returns(curve[col], days)
+            if r.empty:
+                continue
+            years = days / 252
+            med = r.median()
+            rows.append({
+                "보유기간": label, "구분": who,
+                "평균(%)": r.mean(), "중앙값(%)": med,
+                "연환산 중앙값(%)": ((1 + med / 100) ** (1 / years) - 1) * 100 if years >= 1 else None,
+                "최저(%)": r.min(), "최고(%)": r.max(),
+                "플러스 확률(%)": (r > 0).mean() * 100,
+                "-10% 이상 손실 확률(%)": (r <= -10).mean() * 100,
+                "표본 수": len(r),
+            })
+    return pd.DataFrame(rows)
+
+
+def yearly_table(curve: pd.DataFrame) -> pd.DataFrame:
+    """연도별 수익률(%) — 첫해/마지막해는 데이터가 있는 구간만"""
+    out = {}
+    for col, who in (("Equity", "전략"), ("BuyHold", "단순 보유")):
+        s = curve[col]
+        ends = s.groupby(s.index.year).last()
+        starts = ends.shift(1)
+        starts.iloc[0] = s.iloc[0]
+        out[who] = (ends / starts - 1) * 100
+    df = pd.DataFrame(out)
+    df.index.name = "연도"
+    df["차이(%p)"] = df["전략"] - df["단순 보유"]
+    return df.reset_index()
+
+
+def rolling_frame(curve: pd.DataFrame, days: int) -> pd.DataFrame:
+    """시작일별 보유 수익률(%) — 전략/단순 보유"""
+    return pd.DataFrame({
+        "전략": rolling_returns(curve["Equity"], days),
+        "단순 보유": rolling_returns(curve["BuyHold"], days),
+    }).dropna()
