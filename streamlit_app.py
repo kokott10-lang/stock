@@ -50,14 +50,15 @@ def trade_markers(curve: pd.DataFrame, trades: pd.DataFrame) -> pd.DataFrame:
     return m
 
 
-def equity_chart(curve: pd.DataFrame, trades: pd.DataFrame) -> alt.Chart:
+def equity_chart(curve: pd.DataFrame, trades: pd.DataFrame, log: bool = False) -> alt.Chart:
     line_df = (curve[["Equity", "BuyHold"]]
                .rename(columns={"Equity": "전략 자산", "BuyHold": "단순 보유"})
                .rename_axis("날짜").reset_index()
                .melt("날짜", var_name="구분", value_name="자산"))
     lines = alt.Chart(line_df).mark_line(strokeWidth=1.8).encode(
         x=alt.X("날짜:T", title=None),
-        y=alt.Y("자산:Q", title="자산(원)", axis=alt.Axis(format=",.0f"), scale=alt.Scale(zero=False)),
+        y=alt.Y("자산:Q", title="자산(원)", axis=alt.Axis(format=",.0f"),
+                scale=alt.Scale(type="log") if log else alt.Scale(zero=False)),
         color=alt.Color("구분:N", title=None,
                         scale=alt.Scale(domain=["전략 자산", "단순 보유"], range=["#2f6fed", "#9aa3ad"]),
                         legend=alt.Legend(orient="top")),
@@ -136,8 +137,9 @@ with st.sidebar:
                    + " — 6자리 종목코드나 미국 티커를 직접 입력해도 됩니다.")
 
 today = date.today()
-start = st.sidebar.date_input("시작일", today - timedelta(days=365 * 3), max_value=today)
-end = st.sidebar.date_input("종료일", today, max_value=today)
+MIN_DATE = date(1990, 1, 1)
+start = st.sidebar.date_input("시작일", today - timedelta(days=365 * 3), min_value=MIN_DATE, max_value=today)
+end = st.sidebar.date_input("종료일", today, min_value=MIN_DATE, max_value=today)
 c1, c2 = st.sidebar.columns(2)
 cash = c1.number_input("초기 자금(원)", min_value=100_000, value=10_000_000, step=1_000_000)
 commission = c2.number_input("거래비용(편도 %)", min_value=0.0, value=0.1, step=0.01, format="%.2f")
@@ -201,7 +203,8 @@ k[3].metric("샤프 지수", "-" if sh is None else f"{sh:.2f}")
 trades = r["res"]["trades"]
 
 st.markdown("#### 자산 곡선")
-st.altair_chart(equity_chart(r["res"]["curve"], trades), use_container_width=True)
+log_scale = st.toggle("로그 스케일 (기간이 길 때 비교하기 쉬움)", value=r["bars"] > 252 * 5)
+st.altair_chart(equity_chart(r["res"]["curve"], trades, log=log_scale), use_container_width=True)
 st.caption("▲ 빨강 = 매수, ▼ 파랑 = 매도 · 점에 마우스를 올리면 거래 내용이 보입니다.")
 
 st.markdown(f"#### 거래 내역 ({len(trades)}건)")
