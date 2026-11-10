@@ -23,7 +23,8 @@ st.set_page_config(page_title="주식 백테스트", page_icon="📈", layout="w
 
 
 @st.cache_data(ttl=60 * 60 * 24, show_spinner="종목 목록 불러오는 중…")
-def get_listing():
+def get_listing(version: str):
+    # version 이 바뀌면(지수·ETF 목록 수정 시) 캐시를 새로 만든다
     return core.load_listing()
 
 
@@ -119,7 +120,7 @@ st.sidebar.header("설정")
 
 listing, listing_errs = None, []
 try:
-    listing, listing_errs = get_listing()
+    listing, listing_errs = get_listing(core.listing_version())
 except Exception as e:  # noqa: BLE001
     listing_errs = [str(e)]
 
@@ -159,6 +160,13 @@ with st.sidebar:
     if listing_errs:
         st.caption("⚠️ 불러오지 못한 목록: " + ", ".join(listing_errs)
                    + " — 6자리 종목코드나 미국 티커를 직접 입력해도 됩니다.")
+    if listing is not None:
+        n = listing["Market"].value_counts()
+        st.caption(f"검색 가능: 국내 주식 {n.drop(['ETF', '미국 ETF', '지수'], errors='ignore').sum():,} · "
+                   f"ETF {n.get('ETF', 0):,} · 미국 ETF {n.get('미국 ETF', 0)} · 지수 {n.get('지수', 0)}")
+    if st.button("🔄 종목 목록 새로고침", help="검색이 이상하면 눌러서 목록을 다시 불러오세요."):
+        get_listing.clear()
+        st.rerun()
 
 today = date.today()
 MIN_DATE = date(1990, 1, 1)

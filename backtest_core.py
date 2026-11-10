@@ -135,6 +135,13 @@ ALIASES = [
 ]
 
 
+def listing_version() -> str:
+    """고정 목록(지수·ETF·별칭)이 바뀌면 달라지는 값 — 앱의 목록 캐시를 자동으로 새로 만들 때 사용"""
+    import hashlib
+    raw = repr((sorted(INDICES.items()), KR_ETFS, US_ETFS, ALIASES)).encode()
+    return hashlib.md5(raw).hexdigest()[:10]
+
+
 def _norm(text: str) -> str:
     """검색용 정규화: 소문자, 공백·기호 제거"""
     return "".join(ch for ch in str(text).lower() if ch.isalnum())
