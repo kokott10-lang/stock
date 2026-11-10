@@ -50,15 +50,36 @@ def trade_markers(curve: pd.DataFrame, trades: pd.DataFrame) -> pd.DataFrame:
     return m
 
 
-def equity_chart(curve: pd.DataFrame, trades: pd.DataFrame, log: bool = False) -> alt.Chart:
+def crisis_frame(curve: pd.DataFrame) -> pd.DataFrame:
+    """차트 기간과 겹치는 급락 구간 (고점~저점)"""
+    lo, hi = curve.index.min(), curve.index.max()
+    rows = []
+    for name_, peak, trough, *_ in core.CRISES:
+        a, b = pd.Timestamp(peak), pd.Timestamp(trough)
+        if b >= lo and a <= hi:
+            rows.append({"위기": name_, "시작": max(a, lo), "끝": min(b, hi),
+                         "기간": f"{peak} ~ {trough}"})
+    return pd.DataFrame(rows)
+
+
+def crisis_layer(curve: pd.DataFrame):
+    cf = crisis_frame(curve)
+    if cf.empty:
+        return None
+    return alt.Chart(cf).mark_rect(color="#e8590c", opacity=0.12).encode(
+        x="시작:T", x2="끝:T", tooltip=["위기:N", alt.Tooltip("기간:N", title="고점 ~ 저점")])
+
+
+def equity_chart(curve: pd.DataFrame, trades: pd.DataFrame, log: bool = False,
+                 crises: bool = True) -> alt.Chart:
     line_df = (curve[["Equity", "BuyHold"]]
                .rename(columns={"Equity": "전략 자산", "BuyHold": "단순 보유"})
                .rename_axis("날짜").reset_index()
                .melt("날짜", var_name="구분", value_name="자산"))
     lines = alt.Chart(line_df).mark_line(strokeWidth=1.8).encode(
-        x=alt.X("날짜:T", title=None),
+        x=alt.X("날짜:T", title=None, axis=alt.Axis(format="%Y-%m")),
         y=alt.Y("자산:Q", title="자산(원)", axis=alt.Axis(format=",.0f"),
-                scale=alt.Scale(type="log") if log else alt.Scale(zero=False)),
+                scale=alt.Scale(type="log", nice=False) if log else alt.Scale(zero=False)),
         color=alt.Color("구분:N", title=None,
                         scale=alt.Scale(domain=["전략 자산", "단순 보유"], range=["#2f6fed", "#9aa3ad"]),
                         legend=alt.Legend(orient="top")),
@@ -67,6 +88,9 @@ def equity_chart(curve: pd.DataFrame, trades: pd.DataFrame, log: bool = False) -
         tooltip=[alt.Tooltip("날짜:T", format="%Y-%m-%d"), "구분:N",
                  alt.Tooltip("자산:Q", format=",.0f")],
     )
+    band = crisis_layer(curve) if crises else None
+    if band is not None:
+        lines = alt.layer(band, lines)
     m = trade_markers(curve, trades)
     if m.empty:
         return lines.properties(height=380)
@@ -116,12 +140,12 @@ with st.sidebar:
         picked = st_searchbox(
             search_options,
             label="종목 · ETF 검색",
-            placeholder="예: 현대차, 005380, 나스닥100, S&P500, QQQ",
+            placeholder="예: 현대차, 나스닥100, S&P500, 코스피 지수, QQQ",
             key="stock_search",
             debounce=200,
         )
     else:  # 부품이 없으면 일반 입력창 + 목록으로 대체
-        q = st.text_input("종목 · ETF 검색", placeholder="예: 현대차, 005380, 나스닥100, S&P500, QQQ")
+        q = st.text_input("종목 · ETF 검색", placeholder="예: 현대차, 나스닥100, S&P500, 코스피 지수, QQQ")
         opts = search_options(q)
         picked = None
         if opts:
@@ -138,8 +162,32 @@ with st.sidebar:
 
 today = date.today()
 MIN_DATE = date(1990, 1, 1)
-start = st.sidebar.date_input("시작일", today - timedelta(days=365 * 3), min_value=MIN_DATE, max_value=today)
-end = st.sidebar.date_input("종료일", today, min_value=MIN_DATE, max_value=today)
+
+# 기간 바로가기: 고르면 시작일/종료일이 자동으로 바뀜
+PRESETS = {
+    "최근 3년": (today - timedelta(days=365 * 3), today),
+    "최근 5년": (today - timedelta(days=365 * 5), today),
+    "최근 10년": (today - timedelta(days=365 * 10), today),
+    "2000년부터": (date(2000, 1, 1), today),
+    "가능한 전체 (1990년~)": (MIN_DATE, today),
+}
+for name_, _peak, _trough, s_, e_ in core.CRISES:
+    PRESETS[f"📉 {name_} ({_peak[:4]})"] = (date.fromisoformat(s_), min(date.fromisoformat(e_), today))
+
+if "start_date" not in st.session_state:
+    st.session_state["start_date"], st.session_state["end_date"] = PRESETS["최근 3년"]
+
+
+def apply_preset():
+    key = st.session_state.get("preset")
+    if key in PRESETS:
+        st.session_state["start_date"], st.session_state["end_date"] = PRESETS[key]
+
+
+st.sidebar.selectbox("기간 바로가기", ["직접 선택"] + list(PRESETS), key="preset", on_change=apply_preset,
+                     help="위기 구간을 고르면 위기 전부터 회복기까지 기간이 자동으로 들어갑니다.")
+start = st.sidebar.date_input("시작일", key="start_date", min_value=MIN_DATE, max_value=today)
+end = st.sidebar.date_input("종료일", key="end_date", min_value=MIN_DATE, max_value=today)
 c1, c2 = st.sidebar.columns(2)
 cash = c1.number_input("초기 자금(원)", min_value=100_000, value=10_000_000, step=1_000_000)
 commission = c2.number_input("거래비용(편도 %)", min_value=0.0, value=0.1, step=0.01, format="%.2f")
@@ -167,7 +215,8 @@ if run:
         try:
             df = get_prices(code, start.isoformat(), end.isoformat())
             plot_path = os.path.join(tempfile.gettempdir(), f"bt_{code}_{skey}.html")
-            res = core.run_backtest(df, skey, float(cash), float(commission), params, plot_path)
+            res = core.run_backtest(df, skey, float(cash), float(commission), params, plot_path,
+                                    fractional=True if code.upper() in core.INDICES else None)
             plot_html = None
             if res["plot"]:
                 with open(res["plot"], encoding="utf-8") as f:
@@ -203,9 +252,37 @@ k[3].metric("샤프 지수", "-" if sh is None else f"{sh:.2f}")
 trades = r["res"]["trades"]
 
 st.markdown("#### 자산 곡선")
-log_scale = st.toggle("로그 스케일 (기간이 길 때 비교하기 쉬움)", value=r["bars"] > 252 * 5)
-st.altair_chart(equity_chart(r["res"]["curve"], trades, log=log_scale), use_container_width=True)
-st.caption("▲ 빨강 = 매수, ▼ 파랑 = 매도 · 점에 마우스를 올리면 거래 내용이 보입니다.")
+t1_, t2_ = st.columns(2)
+log_scale = t1_.toggle("로그 스케일 (기간이 길 때 비교하기 쉬움)", value=r["bars"] > 252 * 5)
+show_crises = t2_.toggle("급락 구간 표시", value=True)
+st.altair_chart(equity_chart(r["res"]["curve"], trades, log=log_scale, crises=show_crises),
+                use_container_width=True)
+st.caption("▲ 빨강 = 매수, ▼ 파랑 = 매도 · 주황 음영 = 역사적 급락 구간(고점~저점, 대략) · "
+           "점이나 음영에 마우스를 올리면 내용이 보입니다.")
+
+cf = crisis_frame(r["res"]["curve"])
+if show_crises and not cf.empty:
+    eqc = r["res"]["curve"]
+    rows = []
+    for _, c in cf.iterrows():
+        seg = eqc.loc[c["시작"]:c["끝"]]
+        if len(seg) < 2:
+            continue
+        after = eqc.loc[c["시작"]:]
+        row = {"위기": c["위기"], "기간": c["기간"]}
+        for col, who in (("Equity", "전략"), ("BuyHold", "단순 보유")):
+            start_v = seg[col].iloc[0]
+            row[f"{who} 낙폭(%)"] = (seg[col].min() / start_v - 1) * 100
+            rec = after[after[col] >= start_v]
+            rec = rec[rec.index > seg[col].idxmin()]
+            row[f"{who} 회복"] = rec.index[0].strftime("%Y-%m") if not rec.empty else "미회복"
+        rows.append(row)
+    if rows:
+        with st.expander(f"급락 구간별 성과 ({len(rows)}개)", expanded=True):
+            st.caption("낙폭 = 급락 시작일 대비 그 구간 최저 자산. 회복 = 급락 시작일 자산을 다시 넘은 달.")
+            st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True,
+                         column_config={c: st.column_config.NumberColumn(format="%.1f")
+                                        for c in ["전략 낙폭(%)", "단순 보유 낙폭(%)"]})
 
 st.markdown(f"#### 거래 내역 ({len(trades)}건)")
 st.dataframe(
@@ -285,7 +362,7 @@ with tab3:
         st.caption(f"x축 날짜에 사서 **{h}** 보유했다면 얻었을 수익률입니다. 0선 아래는 손실 구간입니다.")
         long = rf.rename_axis("매수일").reset_index().melt("매수일", var_name="구분", value_name="수익률(%)")
         line = alt.Chart(long).mark_line(strokeWidth=1.6).encode(
-            x=alt.X("매수일:T", title="매수일"),
+            x=alt.X("매수일:T", title="매수일", axis=alt.Axis(format="%Y-%m")),
             y=alt.Y("수익률(%):Q", title="수익률(%)"),
             color=alt.Color("구분:N", scale=COLORS, legend=alt.Legend(orient="top", title=None)),
             tooltip=[alt.Tooltip("매수일:T", format="%Y-%m-%d"), "구분:N",

@@ -67,6 +67,7 @@ def api_backtest():
             commission_pct=float(body.get("commission") or 0),
             params=body.get("params") or {},
             plot_path=os.path.join(PLOT_DIR, plot_id + ".html"),
+            fractional=True if code.upper() in core.INDICES else None,
         )
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
@@ -87,7 +88,7 @@ def api_backtest():
         },
         "trades": [
             {
-                "entryTime": r["매수일"], "exitTime": r["매도일"], "size": int(r["수량"]),
+                "entryTime": r["매수일"], "exitTime": r["매도일"], "size": core.to_plain(r["수량"]),
                 "entryPrice": core.to_plain(r["매수가"]), "exitPrice": core.to_plain(r["매도가"]),
                 "pnl": core.to_plain(r["손익(원)"]), "returnPct": core.to_plain(r["수익률(%)"]),
             }

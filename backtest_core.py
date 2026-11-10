@@ -13,6 +13,11 @@ import FinanceDataReader as fdr
 from backtesting import Backtest, Strategy
 from backtesting.lib import crossover
 
+try:  # backtesting.py 0.6+
+    from backtesting.lib import FractionalBacktest
+except ImportError:  # 구버전이면 소수 단위 매수 없이 진행
+    FractionalBacktest = None
+
 log = logging.getLogger(__name__)
 
 
@@ -89,6 +94,36 @@ KR_ETFS = [
     ("261240", "KODEX 미국달러선물"),
 ]
 
+# 지수: 코드 → (이름, 통화, 시세 조회 순서)
+#  - 실제로 살 수는 없지만, 상품이 생기기 전 시기(예: IMF 외환위기)까지 분석할 때 사용
+#  - 가격이 커서 소수 단위로 사고판다고 가정
+INDICES = {
+    "KS11": ("코스피 지수", "KRW", ["KS11", "YAHOO:^KS11"]),
+    "KS200": ("코스피200 지수", "KRW", ["KS200", "YAHOO:^KS200"]),
+    "KQ11": ("코스닥 지수", "KRW", ["KQ11", "YAHOO:^KQ11"]),
+    "NDX": ("나스닥100 지수", "USD", ["YAHOO:^NDX"]),
+    "IXIC": ("나스닥 종합지수", "USD", ["IXIC", "YAHOO:^IXIC"]),
+    "US500": ("S&P500 지수", "USD", ["US500", "YAHOO:^GSPC"]),
+    "DJI": ("다우존스 산업평균지수", "USD", ["DJI", "YAHOO:^DJI"]),
+    "RUT": ("러셀2000 지수", "USD", ["RUT", "YAHOO:^RUT"]),
+    "SOX": ("필라델피아 반도체 지수", "USD", ["YAHOO:^SOX"]),
+}
+
+# 역사적 급락 구간 (이름, 고점일, 저점일, 바로가기 시작일, 바로가기 종료일)
+# 고점·저점은 대표 지수 기준 대략적인 날짜
+CRISES = [
+    ("IMF 외환위기", "1997-06-17", "1998-06-16", "1996-01-01", "2000-12-31"),
+    ("닷컴 버블 붕괴", "2000-03-10", "2002-10-09", "1999-01-01", "2007-12-31"),
+    ("글로벌 금융위기 (리먼 사태)", "2007-10-09", "2009-03-09", "2006-01-01", "2013-12-31"),
+    ("미국 신용등급 강등·유럽 재정위기", "2011-07-22", "2011-10-03", "2010-07-01", "2013-06-30"),
+    ("중국 증시 폭락", "2015-06-12", "2016-02-11", "2014-07-01", "2017-06-30"),
+    ("미중 무역전쟁·금리 인상", "2018-09-20", "2018-12-24", "2018-01-01", "2019-12-31"),
+    ("코로나 폭락", "2020-02-19", "2020-03-23", "2019-07-01", "2021-06-30"),
+    ("2022 금리 인상기", "2022-01-03", "2022-10-12", "2021-01-01", "2024-06-30"),
+    ("엔캐리 청산 (블랙먼데이)", "2024-07-11", "2024-08-05", "2024-03-01", "2025-03-31"),
+    ("미국 상호관세 충격", "2025-02-19", "2025-04-08", "2024-10-01", "2025-12-31"),
+]
+
 # 검색어 별칭: 이름에 이 패턴이 있으면 별칭으로도 검색되게
 ALIASES = [
     (r"(?<![0-9])200(?![0-9])", "코스피200 kospi200"),
@@ -105,9 +140,16 @@ def _norm(text: str) -> str:
     return "".join(ch for ch in str(text).lower() if ch.isalnum())
 
 
+def currency(code: str) -> str:
+    """종목 통화: 지수는 표에 정한 대로, 6자리 숫자는 원화, 그 외(미국 티커)는 달러"""
+    code = code.upper()
+    if code in INDICES:
+        return INDICES[code][1]
+    return "KRW" if (code.isdigit() and len(code) == 6) else "USD"
+
+
 def is_foreign(code: str) -> bool:
-    """6자리 숫자가 아니면 해외(미국) 종목으로 간주"""
-    return not (code.isdigit() and len(code) == 6)
+    return currency(code) != "KRW"
 
 
 def load_listing():
@@ -158,12 +200,15 @@ def load_listing():
         errors.append("국내 ETF 전체 목록(주요 ETF만 검색됨)")
     parts.append(pd.DataFrame([(c, n, "ETF") for c, n in KR_ETFS], columns=["Code", "Name", "Market"]))
 
-    # 3) 미국 ETF (고정 목록)
+    # 3) 지수
+    parts.append(pd.DataFrame([(c, v[0], "지수") for c, v in INDICES.items()], columns=["Code", "Name", "Market"]))
+
+    # 4) 미국 ETF (고정 목록)
     parts.append(pd.DataFrame([(c, n, "미국 ETF") for c, n in US_ETFS], columns=["Code", "Name", "Market"]))
 
     df = pd.concat(parts, ignore_index=True)
     df["Code"] = df["Code"].astype(str)
-    kr = ~df["Market"].eq("미국 ETF")
+    kr = ~df["Market"].isin(["미국 ETF", "지수"])
     df.loc[kr, "Code"] = df.loc[kr, "Code"].str.zfill(6)
     df = df.drop_duplicates("Code").reset_index(drop=True)
 
@@ -205,9 +250,12 @@ def search_listing(df: pd.DataFrame, q: str, limit: int = 30) -> pd.DataFrame:
 
 
 def price_note(code: str) -> str | None:
+    notes = []
+    if code.upper() in INDICES:
+        notes.append("지수는 실제로 살 수 없는 값이라, 소수 단위로 사고팔 수 있다고 가정했습니다 (운용보수·배당 미반영).")
     if is_foreign(code):
-        return "미국 종목은 달러 가격을 일별 원/달러 환율로 원화 환산해 계산했습니다 (환율 변동 포함)."
-    return None
+        notes.append("달러 가격을 일별 원/달러 환율로 원화 환산해 계산했습니다 (환율 변동 포함).")
+    return " ".join(notes) or None
 
 
 def _read_prices(code: str, start: str, end: str) -> pd.DataFrame:
@@ -215,7 +263,13 @@ def _read_prices(code: str, start: str, end: str) -> pd.DataFrame:
     시세 조회. 국내 종목은 네이버(기본) → 야후(.KS / .KQ) 순서로 시도.
     (해외 서버에서 실행되는 Streamlit Cloud 에서는 네이버가 막히는 경우가 있음)
     """
-    sources = [code] if is_foreign(code) else [code, f"YAHOO:{code}.KS", f"YAHOO:{code}.KQ"]
+    code = code.upper()
+    if code in INDICES:
+        sources = INDICES[code][2]
+    elif is_foreign(code):
+        sources = [code]
+    else:
+        sources = [code, f"YAHOO:{code}.KS", f"YAHOO:{code}.KQ"]
     errors = []
     for src in sources:
         try:
@@ -434,7 +488,8 @@ def to_plain(v):
 
 
 def run_backtest(df: pd.DataFrame, strategy: str, cash: float, commission_pct: float,
-                 params: dict | None = None, plot_path: str | None = None) -> dict:
+                 params: dict | None = None, plot_path: str | None = None,
+                 fractional: bool | None = None) -> dict:
     """
     백테스트 실행. 결과:
       summary  주요 지표 dict
@@ -446,7 +501,11 @@ def run_backtest(df: pd.DataFrame, strategy: str, cash: float, commission_pct: f
     Strat = info["cls"]
     if len(df) < 30:
         raise ValueError("기간 내 시세 데이터가 너무 적습니다 (30거래일 이상 필요).")
-    if cash < df["Close"].iloc[0]:
+    # 소수 단위 매매: 지수처럼 호출하는 쪽에서 지정, 지정이 없으면 1주도 못 살 때만
+    if fractional is None:
+        fractional = cash < df["Close"].iloc[0]
+    fractional = bool(fractional) and FractionalBacktest is not None
+    if not fractional and cash < df["Close"].iloc[0]:
         raise ValueError("초기 자금이 첫날 주가보다 적어 1주도 살 수 없습니다.")
 
     clean = {}
@@ -455,10 +514,13 @@ def run_backtest(df: pd.DataFrame, strategy: str, cash: float, commission_pct: f
             clean[k] = type(getattr(Strat, k))(float(v))
 
     kw = dict(cash=cash, commission=commission_pct / 100, exclusive_orders=False)
+    BT = Backtest
+    if fractional:
+        BT, kw["fractional_unit"] = FractionalBacktest, 1e-4  # 0.0001 단위까지
     try:
-        bt = Backtest(df, Strat, finalize_trades=True, **kw)
+        bt = BT(df, Strat, finalize_trades=True, **kw)
     except TypeError:  # 구버전 backtesting.py
-        bt = Backtest(df, Strat, **kw)
+        bt = BT(df, Strat, **kw)
     stats = bt.run(**clean)
 
     summary = {k: to_plain(stats.get(k)) for k in SUMMARY_KEYS if k in stats}
@@ -473,7 +535,7 @@ def run_backtest(df: pd.DataFrame, strategy: str, cash: float, commission_pct: f
     trades = pd.DataFrame({
         "매수일": t["EntryTime"].dt.strftime("%Y-%m-%d"),
         "매도일": t["ExitTime"].dt.strftime("%Y-%m-%d"),
-        "수량": t["Size"].astype(int),
+        "수량": t["Size"].round(4) if fractional else t["Size"].round().astype(int),
         "매수가": t["EntryPrice"].round(0),
         "매도가": t["ExitPrice"].round(0),
         "손익(원)": t["PnL"].round(0),
@@ -488,7 +550,7 @@ def run_backtest(df: pd.DataFrame, strategy: str, cash: float, commission_pct: f
         except Exception as e:  # noqa: BLE001
             log.warning("상세 차트 생성 실패: %s", e)
 
-    return {"summary": summary, "curve": curve, "trades": trades, "plot": plot}
+    return {"summary": summary, "curve": curve, "trades": trades, "plot": plot, "fractional": fractional}
 
 
 # ---------------------------------------------------------------------------
