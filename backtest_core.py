@@ -63,6 +63,32 @@ US_ETFS = [
     ("IBIT", "iShares 비트코인 (Bitcoin Trust)"),
 ]
 
+# 국내 주요 ETF (네이버 ETF 목록을 못 받아올 때를 대비한 기본 목록 · 이름은 바뀌었을 수 있음)
+KR_ETFS = [
+    ("069500", "KODEX 200"),
+    ("102110", "TIGER 200"),
+    ("278530", "KODEX 200TR"),
+    ("122630", "KODEX 레버리지"),
+    ("114800", "KODEX 인버스"),
+    ("252670", "KODEX 200선물인버스2X"),
+    ("229200", "KODEX 코스닥150"),
+    ("233740", "KODEX 코스닥150레버리지"),
+    ("251340", "KODEX 코스닥150선물인버스"),
+    ("133690", "TIGER 미국나스닥100"),
+    ("379810", "KODEX 미국나스닥100TR"),
+    ("367380", "ACE 미국나스닥100"),
+    ("360750", "TIGER 미국S&P500"),
+    ("379800", "KODEX 미국S&P500TR"),
+    ("360200", "ACE 미국S&P500"),
+    ("381180", "TIGER 미국필라델피아반도체나스닥"),
+    ("458730", "TIGER 미국배당다우존스"),
+    ("446720", "SOL 미국배당다우존스"),
+    ("091160", "KODEX 반도체"),
+    ("305720", "KODEX 2차전지산업"),
+    ("132030", "KODEX 골드선물(H)"),
+    ("261240", "KODEX 미국달러선물"),
+]
+
 # 검색어 별칭: 이름에 이 패턴이 있으면 별칭으로도 검색되게
 ALIASES = [
     (r"(?<![0-9])200(?![0-9])", "코스피200 kospi200"),
@@ -121,7 +147,7 @@ def load_listing():
     else:
         errors.append("국내 주식 목록")
 
-    # 2) 국내 ETF (네이버)
+    # 2) 국내 ETF (네이버 전체 목록, 실패해도 아래 기본 목록은 항상 포함)
     try:
         raw = fdr.StockListing("ETF/KR")
         etf = raw[["Symbol", "Name"]].rename(columns={"Symbol": "Code"})
@@ -129,7 +155,8 @@ def load_listing():
         parts.append(etf)
     except Exception as e:  # noqa: BLE001
         log.warning("국내 ETF 목록 실패: %s", e)
-        errors.append("국내 ETF 목록")
+        errors.append("국내 ETF 전체 목록(주요 ETF만 검색됨)")
+    parts.append(pd.DataFrame([(c, n, "ETF") for c, n in KR_ETFS], columns=["Code", "Name", "Market"]))
 
     # 3) 미국 ETF (고정 목록)
     parts.append(pd.DataFrame([(c, n, "미국 ETF") for c, n in US_ETFS], columns=["Code", "Name", "Market"]))
@@ -156,7 +183,12 @@ def search_listing(df: pd.DataFrame, q: str, limit: int = 30) -> pd.DataFrame:
     if not nq:
         return df.iloc[0:0][["Code", "Name", "Market"]]
     code_hit = df["Code"].str.upper().str.startswith(q.upper())
-    hit = df[df["_key"].str.contains(nq, regex=False) | code_hit].copy()
+    # 띄어 쓴 단어가 모두 들어 있으면 일치 (예: "tiger 나스" → TIGER 미국나스닥100)
+    tokens = [t for t in (_norm(w) for w in q.split()) if t]
+    word_hit = pd.Series(True, index=df.index)
+    for t in tokens:
+        word_hit &= df["_key"].str.contains(t, regex=False)
+    hit = df[word_hit | code_hit].copy()
     nn = hit["Name"].map(_norm)
     hit["_r"] = (nn != nq).astype(int) * 2 + (~nn.str.startswith(nq)).astype(int)
     hit.loc[hit["Code"].str.upper() == q.upper(), "_r"] = -1
@@ -178,8 +210,29 @@ def price_note(code: str) -> str | None:
     return None
 
 
+def _read_prices(code: str, start: str, end: str) -> pd.DataFrame:
+    """
+    시세 조회. 국내 종목은 네이버(기본) → 야후(.KS / .KQ) 순서로 시도.
+    (해외 서버에서 실행되는 Streamlit Cloud 에서는 네이버가 막히는 경우가 있음)
+    """
+    sources = [code] if is_foreign(code) else [code, f"YAHOO:{code}.KS", f"YAHOO:{code}.KQ"]
+    errors = []
+    for src in sources:
+        try:
+            df = fdr.DataReader(src, start, end)
+            if df is not None and not df.empty and {"Open", "High", "Low", "Close"} <= set(df.columns):
+                if "Volume" not in df:
+                    df["Volume"] = 0
+                return df
+            errors.append(f"{src}: 데이터 없음")
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"{src}: {e}")
+            log.warning("시세 조회 실패 %s: %s", src, e)
+    raise RuntimeError("시세를 불러오지 못했습니다 → " + " / ".join(errors))
+
+
 def load_prices(code: str, start: str, end: str) -> pd.DataFrame:
-    df = fdr.DataReader(code, start, end)
+    df = _read_prices(code, start, end)
     df = df[["Open", "High", "Low", "Close", "Volume"]].dropna()
     df = df[(df[["Open", "High", "Low", "Close"]] > 0).all(axis=1)]  # 거래정지일 제거
     if is_foreign(code) and not df.empty:

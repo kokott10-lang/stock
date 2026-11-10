@@ -14,6 +14,11 @@ import streamlit.components.v1 as components
 
 import backtest_core as core
 
+try:
+    from streamlit_searchbox import st_searchbox
+except ImportError:  # requirements.txt 의 streamlit-searchbox 가 없을 때
+    st_searchbox = None
+
 st.set_page_config(page_title="주식 백테스트", page_icon="📈", layout="wide")
 
 
@@ -93,19 +98,42 @@ try:
 except Exception as e:  # noqa: BLE001
     listing_errs = [str(e)]
 
+EMPTY = pd.DataFrame(columns=["Code", "Name", "Market", "_key"])
+
+
+def search_options(term: str):
+    """입력할 때마다 호출되는 자동완성 후보: (보여줄 이름, (코드, 이름))"""
+    if not term or not term.strip():
+        return []
+    hits = core.search_listing(listing if listing is not None else EMPTY, term, limit=15)
+    return [(f"{r.Name}  ·  {r.Code}  ·  {r.Market}", (r.Code, r.Name)) for r in hits.itertuples()]
+
+
 code, name = None, None
-q = st.sidebar.text_input("종목 · ETF 검색", placeholder="예: 현대차, 005380, 나스닥100, S&P500, QQQ")
-if listing_errs:
-    st.sidebar.caption("⚠️ 불러오지 못한 목록: " + ", ".join(listing_errs) + " — 종목코드(6자리)나 티커를 직접 입력하면 됩니다.")
-if q:
-    hits = core.search_listing(listing, q) if listing is not None else core.search_listing(
-        pd.DataFrame(columns=["Code", "Name", "Market", "_key"]), q)
-    if hits.empty:
-        st.sidebar.caption("검색 결과가 없습니다.")
-    else:
-        labels = [f"{r.Name}  ({r.Code} · {r.Market})" for r in hits.itertuples()]
-        i = st.sidebar.selectbox("검색 결과", range(len(labels)), format_func=lambda k: labels[k])
-        code, name = hits.loc[i, "Code"], hits.loc[i, "Name"]
+with st.sidebar:
+    if st_searchbox is not None:
+        picked = st_searchbox(
+            search_options,
+            label="종목 · ETF 검색",
+            placeholder="예: 현대차, 005380, 나스닥100, S&P500, QQQ",
+            key="stock_search",
+            debounce=200,
+        )
+    else:  # 부품이 없으면 일반 입력창 + 목록으로 대체
+        q = st.text_input("종목 · ETF 검색", placeholder="예: 현대차, 005380, 나스닥100, S&P500, QQQ")
+        opts = search_options(q)
+        picked = None
+        if opts:
+            i = st.selectbox("검색 결과", range(len(opts)), format_func=lambda k: opts[k][0])
+            picked = opts[i][1]
+        elif q:
+            st.caption("검색 결과가 없습니다.")
+    if picked:
+        code, name = picked
+        st.success(f"선택: {name} ({code})")
+    if listing_errs:
+        st.caption("⚠️ 불러오지 못한 목록: " + ", ".join(listing_errs)
+                   + " — 6자리 종목코드나 미국 티커를 직접 입력해도 됩니다.")
 
 today = date.today()
 start = st.sidebar.date_input("시작일", today - timedelta(days=365 * 3), max_value=today)
