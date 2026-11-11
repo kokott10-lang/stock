@@ -236,6 +236,142 @@ def render_dca(r):
     c[1].metric(f"{h} 적립식 손실 확률", f"{(rd['적립식'] < 0).mean() * 100:.0f}%")
 
 
+def render_portfolio(r):
+    res, s_ = r["res"], r["res"]["summary"]
+    names = r["names"]
+    label = lambda c: f"{names.get(c, c)}"  # noqa: E731
+    w = res["weights"]
+    st.subheader(f"포트폴리오 · 리밸런싱 {core.REBALANCE[r['reb']]}"
+                 + (f" · 매월 {r['contrib']:,.0f}원 적립" if r["contrib"] else ""))
+    st.caption(" · ".join(f"{label(c)} {v * 100:.0f}%" for c, v in w.items()))
+    st.caption(f"{s_['시작']} ~ {s_['끝']}")
+    if r.get("period") and tuple(r["period"]) != (start, end):
+        st.warning(f"사이드바 기간({start} ~ {end})이 이 결과와 다릅니다. **백테스트 실행**을 누르면 새 기간으로 다시 계산합니다.")
+    if r.get("note"):
+        st.info(r["note"])
+
+    k = st.columns(4)
+    k[0].metric("최종 평가금액", fmt_krw(s_["최종 평가금액"]), help=f"{s_['최종 평가금액']:,.0f}원")
+    k[1].metric("총 손익", fmt_krw(s_["총 손익"], sign=True),
+                delta=f"원금 {fmt_krw(s_['총 투자원금'])} 대비 {s_['원금 대비 수익률(%)']:+.1f}%", delta_color="off")
+    k[2].metric("연환산 수익률", fmt_pct(s_["연환산 수익률(%)"]),
+                help="적립이 있으면 돈이 들어간 시점까지 반영한 XIRR, 없으면 CAGR")
+    k[3].metric("최대 낙폭 (MDD)", fmt_pct(s_["최대 낙폭(%)"]), help=f"{s_['최대 낙폭일']} 기준")
+    k = st.columns(4)
+    k[0].metric("변동성 (연)", f"{s_['변동성(%)']:.1f}%")
+    k[1].metric("샤프 지수", "-" if s_["샤프"] is None else f"{s_['샤프']:.2f}")
+    k[2].metric("최악의 해", fmt_pct(s_["최악의 해(%)"]), help=f"{s_['최악의 해']}년")
+    k[3].metric("리밸런싱 / 거래비용", f"{s_['리밸런싱 횟수']:.0f}회 / {fmt_krw(s_['거래비용 합계'])}")
+
+    cv = res["curve"]
+    st.markdown("#### 성장 곡선 (시작 = 100)")
+    tc = st.columns(3)
+    show_assets = tc[0].toggle("개별 자산도 보기", value=False)
+    plog = tc[1].toggle("로그 스케일", value=len(cv) > 252 * 5, key="pf_log")
+    show_cr = tc[2].toggle("급락 구간 표시", value=True, key="pf_cr")
+    g = pd.DataFrame({f"포트폴리오 (리밸런싱 {core.REBALANCE[r['reb']]})": cv["NAV"] * 100})
+    if r["reb"] != "N":
+        g["같은 비중 · 리밸런싱 안 함"] = cv["리밸런싱 안 함"] * 100
+    if show_assets:
+        for c in res["asset_nav"].columns:
+            g[label(c)] = res["asset_nav"][c] * 100
+    gl = g.rename_axis("날짜").reset_index().melt("날짜", var_name="구분", value_name="지수")
+    order = list(g.columns)
+    palette = ["#2f6fed", "#e8590c", "#9aa3ad", "#2b8a3e", "#ae3ec9", "#f59f00", "#1098ad", "#c92a2a", "#5c940d"]
+    lines = alt.Chart(gl).mark_line(strokeWidth=1.6).encode(
+        x=alt.X("날짜:T", title=None, axis=alt.Axis(format="%Y-%m")),
+        y=alt.Y("지수:Q", title="시작 = 100",
+                scale=alt.Scale(type="log", nice=False) if plog else alt.Scale(zero=False)),
+        color=alt.Color("구분:N", sort=order, scale=alt.Scale(domain=order, range=palette[:len(order)]),
+                        legend=alt.Legend(orient="top", title=None, columns=3, labelLimit=320)),
+        size=alt.condition(alt.datum["구분"] == order[0], alt.value(2.6), alt.value(1.2)),
+        tooltip=[alt.Tooltip("날짜:T", format="%Y-%m-%d"), "구분:N", alt.Tooltip("지수:Q", format=",.1f")],
+    )
+    band = crisis_layer(cv.rename(columns={"NAV": "Equity"})) if show_cr else None
+    st.altair_chart((alt.layer(band, lines) if band is not None else lines)
+                    .properties(height=380).interactive(bind_y=False), use_container_width=True)
+    st.caption("적립금 효과를 뺀 '운용 성과'만 비교한 곡선입니다(시간가중). 주황 음영 = 역사적 급락 구간.")
+
+    st.markdown("#### 낙폭 (고점 대비 하락률)")
+    ddf = pd.DataFrame({"포트폴리오": core._drawdown(cv["NAV"]),
+                        "리밸런싱 안 함": core._drawdown(cv["리밸런싱 안 함"])})
+    if r["reb"] == "N":
+        ddf = ddf[["포트폴리오"]]
+    ddl = ddf.rename_axis("날짜").reset_index().melt("날짜", var_name="구분", value_name="낙폭(%)")
+    st.altair_chart(alt.Chart(ddl).mark_area(opacity=0.35, line=True).encode(
+        x=alt.X("날짜:T", title=None, axis=alt.Axis(format="%Y-%m")),
+        y=alt.Y("낙폭(%):Q", stack=None),
+        color=alt.Color("구분:N", scale=alt.Scale(domain=["포트폴리오", "리밸런싱 안 함"],
+                                                  range=["#2f6fed", "#e8590c"]),
+                        legend=alt.Legend(orient="top", title=None)),
+        tooltip=[alt.Tooltip("날짜:T", format="%Y-%m-%d"), "구분:N", alt.Tooltip("낙폭(%):Q", format=".1f")],
+    ).properties(height=220), use_container_width=True)
+
+    if r["contrib"]:
+        st.markdown("#### 원금과 평가금액")
+        ad = cv[["원금", "평가금액"]].rename_axis("날짜").reset_index().melt("날짜", var_name="구분", value_name="금액")
+        st.altair_chart(alt.Chart(ad).mark_line().encode(
+            x=alt.X("날짜:T", title=None, axis=alt.Axis(format="%Y-%m")),
+            y=alt.Y("금액:Q", axis=alt.Axis(format=",.0f")),
+            color=alt.Color("구분:N", scale=alt.Scale(domain=["원금", "평가금액"], range=["#9aa3ad", "#2f6fed"]),
+                            legend=alt.Legend(orient="top", title=None)),
+            tooltip=[alt.Tooltip("날짜:T", format="%Y-%m-%d"), "구분:N", alt.Tooltip("금액:Q", format=",.0f")],
+        ).properties(height=260), use_container_width=True)
+
+    st.markdown("#### 비교")
+    cmp_ = res["compare"].copy()
+    cmp_["구분"] = [x if "단독" not in x else f"{label(x.replace(' 단독 보유', ''))} 단독 보유" for x in cmp_["구분"]]
+    st.dataframe(cmp_, hide_index=True, use_container_width=True,
+                 column_config={c: st.column_config.NumberColumn(format="%.2f") for c in cmp_.columns if c != "구분"})
+    st.caption("같은 기간 각 자산만 들고 있었을 때와 비교합니다. 리밸런싱의 효과는 보통 '수익률은 비슷하거나 약간 낮아도 낙폭·변동성이 줄어드는' 형태로 나타납니다.")
+
+    tab1, tab2, tab3 = st.tabs(["연도별 수익률", "비중 변화", "급락 구간별"])
+    with tab1:
+        y = res["yearly"].rename(columns={c: label(c) for c in w.index})
+        yl = y.melt("연도", value_vars=["포트폴리오", "리밸런싱 안 함"], var_name="구분", value_name="수익률(%)")
+        st.altair_chart(alt.Chart(yl).mark_bar().encode(
+            x=alt.X("연도:O", title=None, axis=alt.Axis(labelAngle=0)),
+            xOffset=alt.XOffset("구분:N", sort=["포트폴리오", "리밸런싱 안 함"]),
+            y="수익률(%):Q",
+            color=alt.Color("구분:N", scale=alt.Scale(domain=["포트폴리오", "리밸런싱 안 함"],
+                                                      range=["#2f6fed", "#e8590c"]),
+                            legend=alt.Legend(orient="top", title=None)),
+            tooltip=["연도:O", "구분:N", alt.Tooltip("수익률(%):Q", format="+.1f")],
+        ).properties(height=280), use_container_width=True)
+        st.dataframe(y, hide_index=True, use_container_width=True,
+                     column_config={c: st.column_config.NumberColumn(format="%+.1f") for c in y.columns if c != "연도"})
+    with tab2:
+        parts = res["parts"].div(res["parts"].sum(axis=1), axis=0) * 100
+        parts = parts.rename(columns={c: label(c) for c in parts.columns})
+        pm = parts.resample("ME").last() if len(parts) > 400 else parts
+        pl = pm.rename_axis("날짜").reset_index().melt("날짜", var_name="자산", value_name="비중(%)")
+        st.altair_chart(alt.Chart(pl).mark_area().encode(
+            x=alt.X("날짜:T", title=None, axis=alt.Axis(format="%Y-%m")),
+            y=alt.Y("비중(%):Q", stack="zero", scale=alt.Scale(domain=[0, 100])),
+            color=alt.Color("자산:N", legend=alt.Legend(orient="top", title=None)),
+            tooltip=[alt.Tooltip("날짜:T", format="%Y-%m"), "자산:N", alt.Tooltip("비중(%):Q", format=".1f")],
+        ).properties(height=280), use_container_width=True)
+        st.caption("리밸런싱 사이에 오른 자산의 비중이 커졌다가, 리밸런싱 날 목표 비중으로 돌아갑니다.")
+    with tab3:
+        rows = []
+        series = {"포트폴리오": cv["NAV"], "리밸런싱 안 함": cv["리밸런싱 안 함"]}
+        series.update({label(c): res["asset_nav"][c] for c in res["asset_nav"].columns if c != core.CASH})
+        for _, c in crisis_frame(cv).iterrows():
+            row = {"위기": c["위기"], "기간": c["기간"]}
+            for nm, sr in series.items():
+                seg = sr.loc[c["시작"]:c["끝"]]
+                row[nm] = (seg.min() / seg.iloc[0] - 1) * 100 if len(seg) > 1 else None
+            rows.append(row)
+        if rows:
+            st.caption("급락 구간(고점~저점) 동안 각 구성의 최대 하락률(%)입니다.")
+            cr = pd.DataFrame(rows)
+            st.dataframe(cr, hide_index=True, use_container_width=True,
+                         column_config={c: st.column_config.NumberColumn(format="%.1f")
+                                        for c in cr.columns if c not in ("위기", "기간")})
+        else:
+            st.info("이 기간에는 표시할 급락 구간이 없습니다.")
+
+
 def fmt_pct(v):
     return "-" if v is None else f"{v:+.2f}%"
 
@@ -252,6 +388,20 @@ except Exception as e:  # noqa: BLE001
     listing_errs = [str(e)]
 
 EMPTY = pd.DataFrame(columns=["Code", "Name", "Market", "_key"])
+
+
+def asset_name(c: str) -> str:
+    """코드 → 보기 좋은 이름 (예: SPY → SPDR S&P500)"""
+    c = str(c).strip()
+    if c.upper() == core.CASH:
+        return "현금"
+    if c.upper() in core.INDICES:
+        return core.INDICES[c.upper()][0]
+    if listing is not None:
+        hit = listing.loc[listing["Code"].str.upper() == c.upper(), "Name"]
+        if not hit.empty:
+            return hit.iloc[0]
+    return c
 
 
 def search_options(term: str):
@@ -333,9 +483,11 @@ start = st.sidebar.date_input("시작일", key="start_date", min_value=MIN_DATE,
                               on_change=on_manual_date)
 end = st.sidebar.date_input("종료일", key="end_date", min_value=MIN_DATE, max_value=today,
                             on_change=on_manual_date)
-mode = st.sidebar.radio("투자 방식", ["거치식", "적립식"], horizontal=True,
-                        help="거치식: 처음에 한 번에 투자 · 적립식: 매월/매년 같은 금액을 사서 보유")
+mode = st.sidebar.radio("투자 방식", ["거치식", "적립식", "포트폴리오"], horizontal=True,
+                        help="거치식: 한 종목에 처음 한 번 투자 · 적립식: 매월/매년 같은 금액을 사서 보유 · "
+                             "포트폴리오: 여러 자산을 비율대로 섞고 주기적으로 리밸런싱")
 skey, info, params, cash = "buyhold", core.STRATEGIES["buyhold"], {}, 0
+pf_weights = {}
 if mode == "거치식":
     c1, c2 = st.sidebar.columns(2)
     cash = c1.number_input("초기 자금(원)", min_value=100_000, value=10_000_000, step=1_000_000)
@@ -347,6 +499,48 @@ if mode == "거치식":
     cols = st.sidebar.columns(2)
     for j, (k, label, default) in enumerate(info["params"]):
         params[k] = cols[j % 2].number_input(label, value=float(default), format="%g", key=f"{skey}_{k}")
+elif mode == "포트폴리오":
+    PF_COLS = ["코드", "비중(%)"]
+
+    def preset_df(key):
+        return pd.DataFrame([(c, float(v)) for c, v in core.PORTFOLIO_PRESETS[key].items()], columns=PF_COLS)
+
+    def apply_pf_preset():
+        k = st.session_state.get("pf_preset")
+        if k in core.PORTFOLIO_PRESETS:
+            st.session_state["pf_df"] = preset_df(k)
+            st.session_state.pop("pf_editor", None)
+
+    if "pf_df" not in st.session_state:
+        st.session_state["pf_df"] = preset_df(next(iter(core.PORTFOLIO_PRESETS)))
+    st.sidebar.selectbox("예시 포트폴리오", list(core.PORTFOLIO_PRESETS), key="pf_preset", on_change=apply_pf_preset,
+                         help="고르면 아래 구성표가 바뀝니다. 표에서 코드·비중을 직접 고치거나 행을 추가/삭제할 수 있습니다.")
+    pf_edit = st.sidebar.data_editor(
+        st.session_state["pf_df"], key="pf_editor", num_rows="dynamic", hide_index=True, use_container_width=True,
+        column_config={"코드": st.column_config.TextColumn(help="종목코드·티커·지수코드, 현금은 CASH"),
+                       "비중(%)": st.column_config.NumberColumn(min_value=0.0, max_value=100.0, step=1.0, format="%g")})
+    if code and st.sidebar.button(f"＋ 검색한 '{name}' 구성에 추가", use_container_width=True):
+        st.session_state["pf_df"] = pd.concat([pf_edit, pd.DataFrame([(code, 10.0)], columns=PF_COLS)],
+                                              ignore_index=True)
+        st.session_state.pop("pf_editor", None)
+        st.rerun()
+    pf_rows = pf_edit.dropna()
+    pf_rows = pf_rows[(pf_rows["코드"].astype(str).str.strip() != "") & (pf_rows["비중(%)"] > 0)]
+    pf_weights = {str(c).strip().upper() if not str(c).strip().isdigit() else str(c).strip(): float(v)
+                  for c, v in zip(pf_rows["코드"], pf_rows["비중(%)"])}
+    wsum = sum(pf_weights.values())
+    st.sidebar.caption(" · ".join(f"{asset_name(c)} {v / wsum * 100:.0f}%" for c, v in pf_weights.items())
+                       + (f"  (입력 합계 {wsum:g}% → 100%로 맞춰 계산)" if wsum and abs(wsum - 100) > 0.01 else "")
+                       if wsum else "구성표에 코드와 비중을 입력하세요.")
+    pf_reb = st.sidebar.radio("리밸런싱", list(core.REBALANCE), format_func=core.REBALANCE.get, horizontal=True,
+                              help="정해진 주기의 첫 거래일에 목표 비중으로 되돌립니다.")
+    c1, c2 = st.sidebar.columns(2)
+    cash = c1.number_input("초기 금액(원)", min_value=100_000, value=10_000_000, step=1_000_000)
+    pf_contrib = c2.number_input("매월 추가 적립(원)", min_value=0, value=0, step=100_000,
+                                 help="0이면 처음 금액만. 넣으면 매월 첫 거래일에 목표 비중대로 나눠 삽니다.")
+    c1, c2 = st.sidebar.columns(2)
+    commission = c1.number_input("거래비용(편도 %)", min_value=0.0, value=0.1, step=0.01, format="%.2f")
+    pf_cash_rate = c2.number_input("현금(CASH) 연 이자율(%)", min_value=0.0, value=3.0, step=0.5, format="%g")
 else:
     dca_freq = st.sidebar.radio("적립 주기", list(core.DCA_FREQS), format_func=core.DCA_FREQS.get,
                                 horizontal=True)
@@ -361,8 +555,9 @@ else:
     st.sidebar.caption(f"📌 **매수 후 보유** — {core.DCA_FREQS[dca_freq]} 첫 거래일 종가로 사서 팔지 않고 끝까지 보유합니다. "
                        "1주 단위로 사고 남은 돈은 다음 매수로 넘깁니다(지수는 소수 단위).")
 
-run = st.sidebar.button("백테스트 실행", type="primary", use_container_width=True, disabled=code is None)
-run = (run or st.session_state.pop("auto_run", False)) and code is not None
+can_run = bool(pf_weights) if mode == "포트폴리오" else code is not None
+run = st.sidebar.button("백테스트 실행", type="primary", use_container_width=True, disabled=not can_run)
+run = (run or st.session_state.pop("auto_run", False)) and can_run
 
 # ---------------------------------------------------------------------------
 # 본문
@@ -375,9 +570,41 @@ if run:
         st.error("시작일이 종료일보다 앞이어야 합니다.")
     else:
         try:
-            df = get_prices(code, start.isoformat(), end.isoformat())
-            is_index = code.upper() in core.INDICES
-            if mode == "적립식":
+            if mode == "포트폴리오":
+                prices, notes = {}, set()
+                for c in pf_weights:
+                    if c == core.CASH:
+                        continue
+                    try:
+                        prices[c] = get_prices(c, start.isoformat(), end.isoformat())["Close"]
+                    except Exception as e:  # noqa: BLE001
+                        raise RuntimeError(f"{asset_name(c)} 시세를 불러오지 못했습니다: {e}") from e
+                    if core.is_foreign(c):
+                        notes.add("미국 자산은 일별 원/달러 환율로 원화 환산했습니다(환율 변동 포함).")
+                    if c.upper() in core.INDICES:
+                        notes.add("지수는 운용보수·배당이 빠진 값입니다.")
+                if core.CASH in pf_weights:
+                    idx = (pd.DataFrame(prices).index if prices
+                           else pd.bdate_range(start, end))
+                    prices[core.CASH] = core.cash_series(idx, float(pf_cash_rate))
+                res = core.run_portfolio(prices, pf_weights, float(cash), float(pf_contrib), pf_reb, float(commission))
+                firsts = {c: sr.dropna().index[0] for c, sr in prices.items() if c != core.CASH}
+                latest = max(firsts.values()) if firsts else None
+                late = ([asset_name(c) for c, f in firsts.items() if f >= latest - pd.Timedelta(days=10)]
+                        if latest is not None and latest > pd.Timestamp(start) + pd.Timedelta(days=10) else [])
+                if late:
+                    notes.add("데이터가 늦게 시작하는 자산(" + ", ".join(late) + ") 때문에 시작일이 "
+                              + res["summary"]["시작"] + "로 밀렸습니다.")
+                st.session_state["result"] = dict(mode="portfolio", res=res, period=(start, end), reb=pf_reb,
+                                                  contrib=float(pf_contrib), note=" ".join(sorted(notes)) or None,
+                                                  names={c: asset_name(c) for c in pf_weights})
+                df = None
+            else:
+                df = get_prices(code, start.isoformat(), end.isoformat())
+            is_index = code.upper() in core.INDICES if code else False
+            if mode == "포트폴리오":
+                pass
+            elif mode == "적립식":
                 res = core.run_dca(df, float(dca_amount), dca_freq, float(commission),
                                    float(dca_initial), fractional=is_index)
                 label = f"적립식 매수 후 보유 · {core.DCA_FREQS[dca_freq]} {dca_amount:,.0f}원"
@@ -407,6 +634,9 @@ if not r:
 
 if r.get("mode") == "dca":
     render_dca(r)
+    st.stop()
+if r.get("mode") == "portfolio":
+    render_portfolio(r)
     st.stop()
 
 s = r["res"]["summary"]

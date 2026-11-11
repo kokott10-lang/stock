@@ -8,6 +8,7 @@ import logging
 import math
 import re
 
+import numpy as np
 import pandas as pd
 import FinanceDataReader as fdr
 from backtesting import Backtest, Strategy
@@ -742,3 +743,169 @@ def rolling_dca(close: pd.Series, years: int, freq: str = "M") -> pd.DataFrame:
         end_price = p[i + n]  # 마지막 적립 다음 기간 첫 거래일에 평가
         out.append((d[i], (units * end_price / n - 1) * 100, (end_price / p[i] - 1) * 100))
     return pd.DataFrame(out, columns=["시작", "적립식", "거치식"]).set_index("시작")
+
+
+# ---------------------------------------------------------------------------
+# 포트폴리오 (여러 자산 비율 배분 + 주기적 리밸런싱)
+# ---------------------------------------------------------------------------
+CASH = "CASH"  # 특수 자산: 정해진 연 이자율로 불어나는 현금
+
+REBALANCE = {"Y": "매년", "Q": "분기마다", "M": "매월", "N": "안 함"}
+
+# 예시 포트폴리오 (2004년 말부터 데이터가 있는 상품 위주 → 2008 금융위기 검증 가능)
+#   SPY: 미국 S&P500 · 069500: KODEX 200 · IEF: 미국채 7-10년 · TLT: 미국채 20년+ · GLD: 금
+PORTFOLIO_PRESETS = {
+    "중립형 (주식 55 · 채권 35 · 금/현금 10)": {"SPY": 45, "069500": 10, "IEF": 35, "GLD": 5, CASH: 5},
+    "안정형 (주식 40 · 채권 45 · 금/현금 15)": {"SPY": 30, "069500": 10, "IEF": 45, "GLD": 5, CASH: 10},
+    "성장형 (주식 65 · 채권 25 · 금/현금 10)": {"SPY": 55, "069500": 10, "IEF": 25, "GLD": 5, CASH: 5},
+    "클래식 60/40 (미국 주식 60 · 미국채 40)": {"SPY": 60, "IEF": 40},
+    "올웨더형 (주식 30 · 장기채 40 · 중기채 15 · 금 15)": {"SPY": 30, "TLT": 40, "IEF": 15, "GLD": 15},
+    "국내 주식 100% (비교용)": {"069500": 100},
+    "미국 주식 100% (비교용)": {"SPY": 100},
+}
+
+
+def period_starts(index: pd.DatetimeIndex, freq: str) -> set:
+    """각 기간(월/분기/년)의 첫 거래일"""
+    s = pd.Series(index, index=index)
+    if freq == "M":
+        keys = [index.year, index.month]
+    elif freq == "Q":
+        keys = [index.year, index.quarter]
+    else:
+        keys = [index.year]
+    return set(s.groupby(keys).first().values)
+
+
+def cash_series(index: pd.DatetimeIndex, rate_pct: float) -> pd.Series:
+    days = (index - index[0]).days.values
+    return pd.Series(1000 * (1 + rate_pct / 100) ** (days / 365.25), index=index)
+
+
+def align_prices(prices: dict) -> pd.DataFrame:
+    """종목별 종가(원화) → 한 표로. 시장마다 휴장일이 달라 직전 값으로 채우고, 모든 자산에 값이 있는 날부터 시작"""
+    px = pd.DataFrame(prices).sort_index().ffill()
+    px = px.dropna()
+    if len(px) < 30:
+        raise ValueError("모든 자산의 시세가 함께 있는 기간이 너무 짧습니다. 시작일을 늦추거나 상장이 늦은 자산을 빼 보세요.")
+    return px
+
+
+def _simulate(px: pd.DataFrame, w: pd.Series, initial: float, contrib: float, rebalance: str, fee: float):
+    """일별 시뮬레이션. 반환: 평가금액, 원금, NAV(시간가중), 자산별 평가금액, 리밸런싱 횟수, 비용 합계"""
+    idx = px.index
+    p = px.values
+    wv = w.reindex(px.columns).values
+    reb = period_starts(idx, rebalance) if rebalance != "N" else set()
+    con = period_starts(idx, "M") if contrib > 0 else set()
+
+    units = initial * (1 - fee) * wv / p[0]
+    invested, nav, prev_val = initial, 1.0, initial * (1 - fee)
+    costs, n_reb = initial * fee, 0
+    vals, invs, navs, parts = [], [], [], []
+    for t in range(len(idx)):
+        d = idx[t]
+        pv = units * p[t]
+        val = pv.sum()
+        if t > 0:
+            nav *= val / prev_val if prev_val > 0 else 1.0
+        new_cash = 0.0
+        if t > 0 and d in con:
+            new_cash = contrib
+            invested += contrib
+        if t > 0 and d in reb:
+            total = val + new_cash
+            trade = np.abs(total * wv - pv).sum()
+            cost = trade * fee
+            units = (total - cost) * wv / p[t]
+            costs += cost
+            n_reb += 1
+        elif new_cash:
+            units = units + new_cash * (1 - fee) * wv / p[t]
+            costs += new_cash * fee
+        pv = units * p[t]
+        prev_val = pv.sum()
+        vals.append(prev_val)
+        invs.append(invested)
+        navs.append(nav)
+        parts.append(pv)
+    parts = pd.DataFrame(parts, index=idx, columns=px.columns)
+    return (pd.Series(vals, index=idx), pd.Series(invs, index=idx), pd.Series(navs, index=idx),
+            parts, n_reb, costs)
+
+
+def _drawdown(nav: pd.Series) -> pd.Series:
+    return (nav / nav.cummax() - 1) * 100
+
+
+def run_portfolio(prices: dict, weights: dict, initial: float = 10_000_000, contrib: float = 0.0,
+                  rebalance: str = "Y", commission_pct: float = 0.1) -> dict:
+    """
+    prices: {코드: 원화 종가 Series}, weights: {코드: 비중(아무 단위, 합으로 나눔)}
+    결과: summary, curve(평가금액·원금·NAV·리밸런싱 안 함 NAV·자산별 NAV), parts(자산별 평가금액),
+          yearly(연도별 수익률), compare(비교표)
+    """
+    w = pd.Series({k: float(v) for k, v in weights.items() if float(v) > 0})
+    if w.empty:
+        raise ValueError("비중이 0보다 큰 자산이 없습니다.")
+    w = w / w.sum()
+    px = align_prices({k: prices[k] for k in w.index})
+    fee = commission_pct / 100
+
+    val, inv, nav, parts, n_reb, costs = _simulate(px, w, initial, contrib, rebalance, fee)
+    _, _, nav_nr, _, _, _ = _simulate(px, w, initial, contrib, "N", fee)
+
+    years = (px.index[-1] - px.index[0]).days / 365.25
+    dd = _drawdown(nav)
+    daily = nav.pct_change().dropna()
+    cagr = (nav.iloc[-1] ** (1 / years) - 1) * 100 if years > 0 else None
+
+    flows_d = [px.index[0]] + [d for d in sorted(period_starts(px.index, "M")) if d != px.index[0]] if contrib > 0 else [px.index[0]]
+    flows = [-initial] + [-contrib] * (len(flows_d) - 1)
+    irr = xirr(flows_d + [px.index[-1]], flows + [val.iloc[-1]]) if contrib > 0 else cagr
+
+    yearly = pd.DataFrame({"포트폴리오": nav, "리밸런싱 안 함": nav_nr})
+    for c in px.columns:
+        yearly[c] = px[c]
+    ends = yearly.groupby(yearly.index.year).last()
+    starts = ends.shift(1)
+    starts.iloc[0] = yearly.iloc[0]
+    yearly = ((ends / starts - 1) * 100)
+    yearly.index.name = "연도"
+
+    def stats(series):
+        r = series / series.iloc[0]
+        d = series.pct_change().dropna()
+        return {
+            "누적 수익률(%)": (r.iloc[-1] - 1) * 100,
+            "연환산(%)": (r.iloc[-1] ** (1 / years) - 1) * 100 if years > 0 else None,
+            "최대 낙폭(%)": _drawdown(series).min(),
+            "변동성(%)": d.std() * (252 ** 0.5) * 100,
+            "샤프": (d.mean() / d.std() * (252 ** 0.5)) if d.std() > 0 else None,
+        }
+
+    compare = [{"구분": "포트폴리오 (리밸런싱 " + REBALANCE[rebalance] + ")", **stats(nav)},
+               {"구분": "같은 비중 · 리밸런싱 안 함", **stats(nav_nr)}]
+    for c in px.columns:
+        row = {"구분": f"{c} 단독 보유", **stats(px[c])}
+        if c == CASH:  # 고정 이자라 변동성·샤프는 의미 없음
+            row["변동성(%)"], row["샤프"] = 0.0, None
+        compare.append(row)
+
+    summary = {
+        "시작": px.index[0].strftime("%Y-%m-%d"), "끝": px.index[-1].strftime("%Y-%m-%d"),
+        "총 투자원금": float(inv.iloc[-1]), "최종 평가금액": val.iloc[-1], "총 손익": val.iloc[-1] - inv.iloc[-1],
+        "원금 대비 수익률(%)": (val.iloc[-1] / inv.iloc[-1] - 1) * 100,
+        "연환산 수익률(%)": irr, "시간가중 연환산(%)": cagr,
+        "최대 낙폭(%)": dd.min(), "최대 낙폭일": dd.idxmin().strftime("%Y-%m-%d"),
+        "변동성(%)": daily.std() * (252 ** 0.5) * 100,
+        "샤프": (daily.mean() / daily.std() * (252 ** 0.5)) if daily.std() > 0 else None,
+        "최악의 해(%)": yearly["포트폴리오"].min(), "최악의 해": int(yearly["포트폴리오"].idxmin()),
+        "최고의 해(%)": yearly["포트폴리오"].max(),
+        "리밸런싱 횟수": n_reb, "거래비용 합계": costs,
+    }
+    summary = {k: (float(v) if isinstance(v, (np.floating, np.integer)) else v) for k, v in summary.items()}
+    curve = pd.DataFrame({"평가금액": val, "원금": inv, "NAV": nav, "리밸런싱 안 함": nav_nr})
+    asset_nav = px / px.iloc[0]
+    return {"summary": summary, "curve": curve, "parts": parts, "asset_nav": asset_nav,
+            "yearly": yearly.reset_index(), "compare": pd.DataFrame(compare), "weights": w}
