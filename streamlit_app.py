@@ -29,6 +29,8 @@ except ImportError:  # requirements.txt 의 streamlit-searchbox 가 없을 때
     st_searchbox = None
 
 st.set_page_config(page_title="주식 백테스트", page_icon="📈", layout="wide")
+# 사이드바를 조금 넓혀 포트폴리오 구성표(이름·코드·비중)가 한눈에 들어오게
+st.markdown("<style>section[data-testid='stSidebar']{min-width:400px;}</style>", unsafe_allow_html=True)
 
 
 @st.cache_data(ttl=60 * 60 * 24, show_spinner="종목 목록 불러오는 중…")
@@ -501,10 +503,17 @@ if mode == "거치식":
     for j, (k, label, default) in enumerate(info["params"]):
         params[k] = cols[j % 2].number_input(label, value=float(default), format="%g", key=f"{skey}_{k}")
 elif mode == "포트폴리오":
-    PF_COLS = ["코드", "비중(%)"]
+    PF_COLS = ["이름", "코드", "비중(%)"]
+
+    def with_names(df):
+        """코드 → 이름 칸 채우기"""
+        df = df.copy()
+        df["이름"] = [asset_name(c) if isinstance(c, str) and c.strip() else "" for c in df["코드"]]
+        return df[PF_COLS]
 
     def preset_df(key):
-        return pd.DataFrame([(c, float(v)) for c, v in core.PORTFOLIO_PRESETS[key].items()], columns=PF_COLS)
+        return with_names(pd.DataFrame([(c, float(v)) for c, v in core.PORTFOLIO_PRESETS[key].items()],
+                                       columns=["코드", "비중(%)"]))
 
     def apply_pf_preset():
         k = st.session_state.get("pf_preset")
@@ -512,17 +521,26 @@ elif mode == "포트폴리오":
             st.session_state["pf_df"] = preset_df(k)
             st.session_state.pop("pf_editor", None)
 
-    if "pf_df" not in st.session_state:
+    if "pf_df" not in st.session_state or "이름" not in st.session_state["pf_df"]:
         st.session_state["pf_df"] = preset_df(next(iter(core.PORTFOLIO_PRESETS)))
     st.sidebar.selectbox("예시 포트폴리오", list(core.PORTFOLIO_PRESETS), key="pf_preset", on_change=apply_pf_preset,
                          help="고르면 아래 구성표가 바뀝니다. 표에서 코드·비중을 직접 고치거나 행을 추가/삭제할 수 있습니다.")
     pf_edit = st.sidebar.data_editor(
         st.session_state["pf_df"], key="pf_editor", num_rows="dynamic", hide_index=True, use_container_width=True,
-        column_config={"코드": st.column_config.TextColumn(help="종목코드·티커·지수코드, 현금은 CASH"),
-                       "비중(%)": st.column_config.NumberColumn(min_value=0.0, max_value=100.0, step=1.0, format="%g")})
+        column_order=PF_COLS, disabled=["이름"],
+        column_config={"이름": st.column_config.TextColumn(width=124, help="코드를 입력하면 자동으로 채워집니다"),
+                       "코드": st.column_config.TextColumn(width=70, help="종목코드·티커·지수코드, 현금은 CASH"),
+                       "비중(%)": st.column_config.NumberColumn(width=82, min_value=0.0, max_value=100.0,
+                                                              step=1.0, format="%g")})
+    # 코드를 새로 넣거나 고치면 이름 칸을 다시 채운다
+    named = with_names(pf_edit)
+    if not named["이름"].fillna("").equals(pf_edit["이름"].fillna("")):
+        st.session_state["pf_df"] = named
+        st.session_state.pop("pf_editor", None)
+        st.rerun()
     if code and st.sidebar.button(f"＋ 검색한 '{name}' 구성에 추가", use_container_width=True):
-        st.session_state["pf_df"] = pd.concat([pf_edit, pd.DataFrame([(code, 10.0)], columns=PF_COLS)],
-                                              ignore_index=True)
+        st.session_state["pf_df"] = with_names(pd.concat(
+            [pf_edit, pd.DataFrame([(code, 10.0)], columns=["코드", "비중(%)"])], ignore_index=True))
         st.session_state.pop("pf_editor", None)
         st.rerun()
     pf_rows = pf_edit.dropna()
@@ -530,9 +548,16 @@ elif mode == "포트폴리오":
     pf_weights = {str(c).strip().upper() if not str(c).strip().isdigit() else str(c).strip(): float(v)
                   for c, v in zip(pf_rows["코드"], pf_rows["비중(%)"])}
     wsum = sum(pf_weights.values())
-    st.sidebar.caption(" · ".join(f"{asset_name(c)} {v / wsum * 100:.0f}%" for c, v in pf_weights.items())
-                       + (f"  (입력 합계 {wsum:g}% → 100%로 맞춰 계산)" if wsum and abs(wsum - 100) > 0.01 else "")
-                       if wsum else "구성표에 코드와 비중을 입력하세요.")
+    if wsum:
+        with st.sidebar.popover("ⓘ 구성 자세히", use_container_width=True):
+            st.markdown("\n".join(f"- **{asset_name(c)}** `{c}` — {v / wsum * 100:.1f}%"
+                                   for c, v in pf_weights.items()))
+            if abs(wsum - 100) > 0.01:
+                st.caption(f"입력 합계 {wsum:g}% → 100%로 맞춰 계산합니다.")
+        if abs(wsum - 100) > 0.01:
+            st.sidebar.caption(f"입력 합계 {wsum:g}% → 100%로 맞춰 계산")
+    else:
+        st.sidebar.caption("구성표에 코드와 비중을 입력하세요.")
     pf_reb = st.sidebar.radio("리밸런싱", list(core.REBALANCE), format_func=core.REBALANCE.get, horizontal=True,
                               help="정해진 주기의 첫 거래일에 목표 비중으로 되돌립니다.")
     cash = st.sidebar.number_input("초기 금액(원)", min_value=100_000, value=10_000_000, step=1_000_000)
