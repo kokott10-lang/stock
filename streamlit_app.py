@@ -109,6 +109,124 @@ def equity_chart(curve: pd.DataFrame, trades: pd.DataFrame, log: bool = False,
     return alt.layer(lines, pts).resolve_scale(color="independent").properties(height=380).interactive(bind_y=False)
 
 
+def fmt_krw(v, sign=False):
+    """큰 금액을 억/만 단위로 (예: 3.06억, 4,500만)"""
+    if v is None:
+        return "-"
+    sg = ("+" if v > 0 else "-" if v < 0 else "") if sign else ("-" if v < 0 else "")
+    a = abs(v)
+    if a >= 1e8:
+        return f"{sg}{a / 1e8:,.2f}억"
+    if a >= 1e4:
+        return f"{sg}{a / 1e4:,.0f}만"
+    return f"{sg}{a:,.0f}"
+
+
+def render_dca(r):
+    res, s_ = r["res"], r["res"]["summary"]
+    cv = res["curve"]
+    st.subheader(f"{r['name']} ({r['code']}) · {r['strategy']}")
+    st.caption(f"{s_['시작']} ~ {s_['끝']} · 매수 {s_['매수 횟수']}회")
+    if r.get("period") and tuple(r["period"]) != (start, end):
+        st.warning(f"사이드바 기간({start} ~ {end})이 이 결과와 다릅니다. **백테스트 실행**을 누르면 새 기간으로 다시 계산합니다.")
+    if r.get("note"):
+        st.info(r["note"])
+
+    k = st.columns(4)
+    k[0].metric("총 투자원금", fmt_krw(s_["총 투자원금"]), help=f"{s_['총 투자원금']:,.0f}원")
+    k[1].metric("최종 평가금액", fmt_krw(s_["최종 평가금액"]), help=f"{s_['최종 평가금액']:,.0f}원")
+    k[2].metric("총 손익", fmt_krw(s_["총 손익"], sign=True), help=f"{s_['총 손익']:+,.0f}원")
+    k[3].metric("누적 수익률", fmt_pct(s_["누적 수익률(%)"]))
+    k = st.columns(4)
+    k[0].metric("연환산 수익률 (XIRR)", fmt_pct(s_["연환산 수익률(%)"]),
+                help="돈이 들어간 시점까지 반영한 연평균 수익률")
+    diff = s_["거치식 수익률(%)"] - s_["누적 수익률(%)"]
+    k[1].metric("같은 총액 거치식이었다면", fmt_pct(s_["거치식 수익률(%)"]),
+                delta=f"적립식보다 {diff:+.1f}%p", delta_color="normal",
+                help="같은 총액을 첫날 한 번에 투자했다면의 누적 수익률")
+    k[2].metric("최저 평가손익률", fmt_pct(s_["최저 평가손익률(%)"]), help=f"{s_['최저 평가손익일']} 기준, 원금 대비")
+    k[3].metric("평균단가(원)", f"{s_['평균단가']:,.0f}",
+                delta=f"현재가 {s_['마지막 종가']:,.0f} ({(s_['마지막 종가'] / s_['평균단가'] - 1) * 100:+.0f}%)")
+
+    st.markdown("#### 원금과 평가금액")
+    tc = st.columns(2)
+    show_lump = tc[0].toggle("같은 총액 거치식 함께 보기", value=False)
+    dlog = tc[1].toggle("로그 스케일", value=r["bars"] > 252 * 5, key="dca_log")
+    yscale = alt.Scale(type="log", nice=False) if dlog else alt.Scale()
+    cols_ = ["원금", "평가금액"] + (["거치식"] if show_lump else [])
+    ld = cv[cols_].rename_axis("날짜").reset_index().melt("날짜", var_name="구분", value_name="금액")
+    palette = {"원금": "#9aa3ad", "평가금액": "#2f6fed", "거치식": "#e8590c"}
+    dashes = {"원금": [4, 3], "평가금액": [1, 0], "거치식": [2, 2]}
+    sc = alt.Scale(domain=cols_, range=[palette[c] for c in cols_])
+    lines = alt.Chart(ld).mark_line(strokeWidth=1.8).encode(
+        x=alt.X("날짜:T", title=None, axis=alt.Axis(format="%Y-%m")),
+        y=alt.Y("금액:Q", title="금액(원)", axis=alt.Axis(format=",.0f"), scale=yscale),
+        color=alt.Color("구분:N", scale=sc, legend=alt.Legend(orient="top", title=None)),
+        strokeDash=alt.StrokeDash("구분:N", legend=None,
+                                  scale=alt.Scale(domain=cols_, range=[dashes[c] for c in cols_])),
+        tooltip=[alt.Tooltip("날짜:T", format="%Y-%m-%d"), "구분:N", alt.Tooltip("금액:Q", format=",.0f")],
+    )
+    band = crisis_layer(cv.rename(columns={"평가금액": "Equity"}))
+    chart = alt.layer(band, lines) if band is not None else lines
+    st.altair_chart(chart.properties(height=360).interactive(bind_y=False), use_container_width=True)
+    st.caption("회색 점선 = 넣은 돈(원금), 파랑 = 평가금액 · 주황 음영 = 역사적 급락 구간")
+
+    st.markdown("#### 평균단가와 주가")
+    ad = cv[["평균단가", "종가"]].dropna().rename_axis("날짜").reset_index().melt(
+        "날짜", var_name="구분", value_name="가격")
+    st.altair_chart(alt.Chart(ad).mark_line(strokeWidth=1.6).encode(
+        x=alt.X("날짜:T", title=None, axis=alt.Axis(format="%Y-%m")),
+        y=alt.Y("가격:Q", title="가격(원)", axis=alt.Axis(format=",.0f"),
+                scale=alt.Scale(type="log", nice=False) if dlog else alt.Scale(zero=False)),
+        color=alt.Color("구분:N", scale=alt.Scale(domain=["종가", "평균단가"], range=["#9aa3ad", "#d63b3b"]),
+                        legend=alt.Legend(orient="top", title=None)),
+        tooltip=[alt.Tooltip("날짜:T", format="%Y-%m-%d"), "구분:N", alt.Tooltip("가격:Q", format=",.0f")],
+    ).properties(height=280), use_container_width=True)
+    st.caption("주가가 빨간 평균단가선 아래에 있는 구간은 평가손실 상태입니다. 하락장에서 꾸준히 사면 평균단가가 내려갑니다.")
+
+    with st.expander(f"매수 내역 ({len(res['buys'])}회)"):
+        st.dataframe(res["buys"], hide_index=True, use_container_width=True,
+                     column_config={c: st.column_config.NumberColumn(format="%,d")
+                                    for c in ["매수가", "평균단가", "누적 원금", "평가금액", "이월 현금"]})
+
+    # 적립 시작 시점별 분석
+    st.markdown("#### 적립 시작 시점별 분석")
+    st.caption("기간 안의 매 시작 시점마다 같은 금액을 N년간 적립했다면 어땠는지, "
+               "같은 기간 처음에 한 번에 넣은 거치식과 비교합니다. (비용 제외, 소수 단위 근사)")
+    close = cv["종가"]
+    rows, frames = [], {}
+    for yrs in (1, 3, 5, 10, 20):
+        rd = core.rolling_dca(close, yrs, r.get("freq", "M"))
+        if len(rd) < 3:
+            continue
+        frames[f"{yrs}년"] = rd
+        for col in ("적립식", "거치식"):
+            v = rd[col]
+            rows.append({"적립 기간": f"{yrs}년", "구분": col, "중앙값(%)": v.median(), "최저(%)": v.min(),
+                         "최고(%)": v.max(), "플러스 확률(%)": (v > 0).mean() * 100, "표본 수": len(v)})
+    if not rows:
+        st.info("기간이 너무 짧습니다. 시작일을 앞당기면(예: 기간 바로가기 → 최근 10년) 분석할 수 있습니다.")
+        return
+    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True,
+                 column_config={c: st.column_config.NumberColumn(format="%.1f")
+                                for c in ["중앙값(%)", "최저(%)", "최고(%)", "플러스 확률(%)"]})
+    h = st.selectbox("그래프로 볼 적립 기간", list(frames), index=min(1, len(frames) - 1))
+    rd = frames[h]
+    long = rd.rename_axis("시작").reset_index().melt("시작", var_name="구분", value_name="수익률(%)")
+    zero = alt.Chart(pd.DataFrame({"y": [0]})).mark_rule(color="#999", strokeDash=[3, 3]).encode(
+        y=alt.Y("y:Q", title="수익률(%)"))
+    st.altair_chart((alt.Chart(long).mark_line(strokeWidth=1.6).encode(
+        x=alt.X("시작:T", title="적립 시작", axis=alt.Axis(format="%Y-%m")),
+        y=alt.Y("수익률(%):Q", title="수익률(%)"),
+        color=alt.Color("구분:N", scale=alt.Scale(domain=["적립식", "거치식"], range=["#2f6fed", "#e8590c"]),
+                        legend=alt.Legend(orient="top", title=None)),
+        tooltip=[alt.Tooltip("시작:T", format="%Y-%m"), "구분:N", alt.Tooltip("수익률(%):Q", format="+.1f")],
+    ) + zero).properties(height=300), use_container_width=True)
+    c = st.columns(2)
+    c[0].metric(f"{h} 적립식이 거치식보다 나았던 비율", f"{(rd['적립식'] > rd['거치식']).mean() * 100:.0f}%")
+    c[1].metric(f"{h} 적립식 손실 확률", f"{(rd['적립식'] < 0).mean() * 100:.0f}%")
+
+
 def fmt_pct(v):
     return "-" if v is None else f"{v:+.2f}%"
 
@@ -187,28 +305,52 @@ if "start_date" not in st.session_state:
 
 
 def apply_preset():
+    """바로가기 선택 → 시작일/종료일 채우고, 결과가 이미 있으면 새 기간으로 자동 재실행"""
     key = st.session_state.get("preset")
     if key in PRESETS:
         st.session_state["start_date"], st.session_state["end_date"] = PRESETS[key]
+        if st.session_state.get("result"):
+            st.session_state["auto_run"] = True
+
+
+def on_manual_date():
+    """날짜를 직접 바꾸면 바로가기 표시를 '직접 선택'으로 (같은 바로가기를 다시 고를 수 있게)"""
+    st.session_state["preset"] = "직접 선택"
 
 
 st.sidebar.selectbox("기간 바로가기", ["직접 선택"] + list(PRESETS), key="preset", on_change=apply_preset,
-                     help="위기 구간을 고르면 위기 전부터 회복기까지 기간이 자동으로 들어갑니다.")
-start = st.sidebar.date_input("시작일", key="start_date", min_value=MIN_DATE, max_value=today)
-end = st.sidebar.date_input("종료일", key="end_date", min_value=MIN_DATE, max_value=today)
-c1, c2 = st.sidebar.columns(2)
-cash = c1.number_input("초기 자금(원)", min_value=100_000, value=10_000_000, step=1_000_000)
-commission = c2.number_input("거래비용(편도 %)", min_value=0.0, value=0.1, step=0.01, format="%.2f")
+                     help="고르면 시작일·종료일이 자동으로 바뀝니다. 위기 구간은 위기 전부터 회복기까지 들어갑니다.")
+start = st.sidebar.date_input("시작일", key="start_date", min_value=MIN_DATE, max_value=today,
+                              on_change=on_manual_date)
+end = st.sidebar.date_input("종료일", key="end_date", min_value=MIN_DATE, max_value=today,
+                            on_change=on_manual_date)
+mode = st.sidebar.radio("투자 방식", ["거치식", "적립식"], horizontal=True,
+                        help="거치식: 처음에 한 번에 투자 · 적립식: 매월/매년 같은 금액을 사서 보유")
+skey, info, params, cash = "buyhold", core.STRATEGIES["buyhold"], {}, 0
+if mode == "거치식":
+    c1, c2 = st.sidebar.columns(2)
+    cash = c1.number_input("초기 자금(원)", min_value=100_000, value=10_000_000, step=1_000_000)
+    commission = c2.number_input("거래비용(편도 %)", min_value=0.0, value=0.1, step=0.01, format="%.2f")
 
-skey = st.sidebar.selectbox("전략", list(core.STRATEGIES), format_func=lambda k: core.STRATEGIES[k]["name"])
-info = core.STRATEGIES[skey]
-st.sidebar.caption(info["desc"])
-params = {}
-cols = st.sidebar.columns(2)
-for j, (k, label, default) in enumerate(info["params"]):
-    params[k] = cols[j % 2].number_input(label, value=float(default), format="%g", key=f"{skey}_{k}")
+    skey = st.sidebar.selectbox("전략", list(core.STRATEGIES), format_func=lambda k: core.STRATEGIES[k]["name"])
+    info = core.STRATEGIES[skey]
+    st.sidebar.caption(info["desc"])
+    cols = st.sidebar.columns(2)
+    for j, (k, label, default) in enumerate(info["params"]):
+        params[k] = cols[j % 2].number_input(label, value=float(default), format="%g", key=f"{skey}_{k}")
+else:
+    dca_freq = st.sidebar.radio("적립 주기", list(core.DCA_FREQS), format_func=core.DCA_FREQS.get,
+                                horizontal=True)
+    c1, c2 = st.sidebar.columns(2)
+    dca_amount = c1.number_input("회당 금액(원)", min_value=10_000, step=100_000,
+                                 value=500_000 if dca_freq == "M" else 6_000_000, key=f"dca_amt_{dca_freq}")
+    commission = c2.number_input("거래비용(편도 %)", min_value=0.0, value=0.1, step=0.01, format="%.2f")
+    dca_initial = st.sidebar.number_input("시작할 때 일시금(원, 선택)", min_value=0, value=0, step=1_000_000)
+    st.sidebar.caption(f"{core.DCA_FREQS[dca_freq]} 첫 거래일 종가로 사서 끝까지 보유합니다. "
+                       "1주 단위로 사고 남은 돈은 다음 매수로 넘깁니다(지수는 소수 단위). 매매 전략은 적용하지 않습니다.")
 
 run = st.sidebar.button("백테스트 실행", type="primary", use_container_width=True, disabled=code is None)
+run = (run or st.session_state.pop("auto_run", False)) and code is not None
 
 # ---------------------------------------------------------------------------
 # 본문
@@ -222,15 +364,27 @@ if run:
     else:
         try:
             df = get_prices(code, start.isoformat(), end.isoformat())
-            plot_path = os.path.join(tempfile.gettempdir(), f"bt_{code}_{skey}.html")
-            res = core.run_backtest(df, skey, float(cash), float(commission), params, plot_path,
-                                    fractional=True if code.upper() in core.INDICES else None)
-            plot_html = None
-            if res["plot"]:
-                with open(res["plot"], encoding="utf-8") as f:
-                    plot_html = f.read()
-            st.session_state["result"] = dict(res=res, name=name, code=code, strategy=info["name"],
-                                              bars=len(df), plot_html=plot_html, note=core.price_note(code))
+            is_index = code.upper() in core.INDICES
+            if mode == "적립식":
+                res = core.run_dca(df, float(dca_amount), dca_freq, float(commission),
+                                   float(dca_initial), fractional=is_index)
+                label = f"적립식 · {core.DCA_FREQS[dca_freq]} {dca_amount:,.0f}원"
+                if dca_initial:
+                    label += f" (+ 일시금 {dca_initial:,.0f}원)"
+                st.session_state["result"] = dict(mode="dca", res=res, name=name, code=code, strategy=label,
+                                                  bars=len(df), note=core.price_note(code), period=(start, end),
+                                                  freq=dca_freq)
+            else:
+                plot_path = os.path.join(tempfile.gettempdir(), f"bt_{code}_{skey}.html")
+                res = core.run_backtest(df, skey, float(cash), float(commission), params, plot_path,
+                                        fractional=True if is_index else None)
+                plot_html = None
+                if res["plot"]:
+                    with open(res["plot"], encoding="utf-8") as f:
+                        plot_html = f.read()
+                st.session_state["result"] = dict(mode="lump", res=res, name=name, code=code, strategy=info["name"],
+                                                  bars=len(df), plot_html=plot_html, note=core.price_note(code),
+                                                  period=(start, end))
         except Exception as e:  # noqa: BLE001
             st.error(f"실행 실패: {e}")
 
@@ -239,9 +393,15 @@ if not r:
     st.info("왼쪽에서 종목이나 ETF를 검색해 선택하고 **백테스트 실행**을 누르세요. (모바일은 왼쪽 위 ☰ 메뉴)")
     st.stop()
 
+if r.get("mode") == "dca":
+    render_dca(r)
+    st.stop()
+
 s = r["res"]["summary"]
 st.subheader(f"{r['name']} ({r['code']}) · {r['strategy']}")
 st.caption(f"{s.get('Start')} ~ {s.get('End')} · {r['bars']}거래일")
+if r.get("period") and tuple(r["period"]) != (start, end):
+    st.warning(f"사이드바 기간({start} ~ {end})이 이 결과와 다릅니다. **백테스트 실행**을 누르면 새 기간으로 다시 계산합니다.")
 if r.get("note"):
     st.info(r["note"])
 

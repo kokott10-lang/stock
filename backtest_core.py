@@ -624,3 +624,121 @@ def rolling_frame(curve: pd.DataFrame, days: int) -> pd.DataFrame:
         "전략": rolling_returns(curve["Equity"], days),
         "단순 보유": rolling_returns(curve["BuyHold"], days),
     }).dropna()
+
+
+# ---------------------------------------------------------------------------
+# 적립식 (정기 매수 후 보유)
+# ---------------------------------------------------------------------------
+DCA_FREQS = {"M": "매월", "Y": "매년"}
+
+
+def dca_dates(index: pd.DatetimeIndex, freq: str) -> pd.DatetimeIndex:
+    """매수일: 매월(또는 매년) 첫 거래일"""
+    s = pd.Series(index, index=index)
+    keys = [index.year, index.month] if freq == "M" else [index.year]
+    return pd.DatetimeIndex(s.groupby(keys).first().values)
+
+
+def xirr(dates, flows) -> float | None:
+    """불규칙한 현금흐름의 연환산 수익률(%) — 투자금이 들어간 시점을 반영"""
+    t = (pd.DatetimeIndex(dates) - pd.Timestamp(dates[0])).days.values / 365.25
+    f = pd.Series(flows, dtype=float).values
+
+    def npv(r):
+        return (f / (1 + r) ** t).sum()
+
+    lo, hi = -0.9999, 10.0
+    if npv(lo) * npv(hi) > 0:
+        return None
+    for _ in range(200):
+        mid = (lo + hi) / 2
+        if npv(lo) * npv(mid) <= 0:
+            hi = mid
+        else:
+            lo = mid
+    return (lo + hi) / 2 * 100
+
+
+def run_dca(df: pd.DataFrame, amount: float, freq: str = "M", commission_pct: float = 0.1,
+            initial: float = 0.0, fractional: bool = False) -> dict:
+    """
+    적립식 시뮬레이션: 매수일 종가로 (amount + 남은 현금) 만큼 매수, 끝까지 보유.
+    정수 주식만 살 수 있으면 남은 돈은 다음 매수로 이월 (fractional=True 면 소수 단위).
+    결과: summary, curve(DataFrame: 원금, 평가금액, 거치식, 평균단가, 종가), buys(매수 내역)
+    """
+    if len(df) < 2:
+        raise ValueError("기간 내 시세 데이터가 너무 적습니다.")
+    close = df["Close"]
+    fee = commission_pct / 100
+    dates = dca_dates(df.index, freq)
+    contrib = pd.Series(0.0, index=df.index)
+    contrib.loc[dates] += amount
+    contrib.iloc[0] += initial
+
+    shares = cash = invested = cost_basis = 0.0
+    rows = []
+    for d, c in contrib[contrib > 0].items():
+        cash += c
+        invested += c
+        price = close.loc[d]
+        unit = price * (1 + fee)
+        qty = cash / unit if fractional else float(int(cash // unit))
+        spent = qty * unit
+        cash -= spent
+        shares += qty
+        cost_basis += spent
+        rows.append({
+            "날짜": d.strftime("%Y-%m-%d"), "매수가": price, "수량": round(qty, 4),
+            "누적 수량": round(shares, 4), "평균단가": cost_basis / shares if shares else None,
+            "누적 원금": invested, "평가금액": shares * price + cash, "이월 현금": cash,
+        })
+    buys = pd.DataFrame(rows)
+    if buys.empty or buys["누적 수량"].iloc[-1] == 0:
+        raise ValueError("회당 금액이 주가보다 작아 한 주도 사지 못했습니다. 금액을 늘려 주세요.")
+
+    b = buys.set_index(pd.to_datetime(buys["날짜"]))
+    shares_ts = b["누적 수량"].reindex(df.index).ffill().fillna(0)
+    cash_ts = b["이월 현금"].reindex(df.index).ffill().fillna(0)
+    avg_ts = b["평균단가"].reindex(df.index).ffill()
+    invested_ts = contrib.cumsum()
+    value = shares_ts * close + cash_ts
+    total = invested_ts.iloc[-1]
+    lump = total / (close.iloc[0] * (1 + fee)) * close  # 같은 총액을 첫날 한 번에
+
+    curve = pd.DataFrame({"원금": invested_ts, "평가금액": value, "거치식": lump,
+                          "평균단가": avg_ts, "종가": close})
+
+    flows_d = list(contrib[contrib > 0].index) + [df.index[-1]]
+    flows = list(-contrib[contrib > 0].values) + [value.iloc[-1]]
+    pl = (value / invested_ts.where(invested_ts > 0) - 1) * 100
+    years = (df.index[-1] - df.index[0]).days / 365.25
+    summary = {
+        "시작": df.index[0].strftime("%Y-%m-%d"), "끝": df.index[-1].strftime("%Y-%m-%d"),
+        "매수 횟수": len(buys), "총 투자원금": total, "최종 평가금액": value.iloc[-1],
+        "총 손익": value.iloc[-1] - total, "누적 수익률(%)": (value.iloc[-1] / total - 1) * 100,
+        "연환산 수익률(%)": xirr(flows_d, flows),
+        "최저 평가손익률(%)": pl.min(), "최저 평가손익일": pl.idxmin().strftime("%Y-%m-%d"),
+        "평균단가": avg_ts.iloc[-1], "마지막 종가": close.iloc[-1],
+        "거치식 최종금액": lump.iloc[-1], "거치식 수익률(%)": (lump.iloc[-1] / total - 1) * 100,
+        "거치식 연환산(%)": ((lump.iloc[-1] / total) ** (1 / years) - 1) * 100 if years > 0 else None,
+    }
+    return {"summary": summary, "curve": curve, "buys": buys}
+
+
+def rolling_dca(close: pd.Series, years: int, freq: str = "M") -> pd.DataFrame:
+    """
+    적립 시작 시점별 결과: 각 시작 시점부터 years 년 동안 같은 금액을 적립했을 때의 수익률(%),
+    그리고 같은 기간 거치식(첫날 한 번에) 수익률(%). 인덱스는 시작일. (소수 단위 매수, 비용 제외 근사)
+    """
+    d = dca_dates(close.index, freq)
+    p = close.loc[d].values
+    n = years * (12 if freq == "M" else 1)
+    if len(p) <= n:
+        return pd.DataFrame(columns=["적립식", "거치식"])
+    inv = pd.Series(1 / p).cumsum().values
+    out = []
+    for i in range(len(p) - n):
+        units = inv[i + n - 1] - (inv[i - 1] if i > 0 else 0)
+        end_price = p[i + n]  # 마지막 적립 다음 기간 첫 거래일에 평가
+        out.append((d[i], (units * end_price / n - 1) * 100, (end_price / p[i] - 1) * 100))
+    return pd.DataFrame(out, columns=["시작", "적립식", "거치식"]).set_index("시작")
