@@ -246,7 +246,7 @@ def render_portfolio(r):
     st.subheader(f"포트폴리오 · 리밸런싱 {core.REBALANCE[r['reb']]}"
                  + (f" · {'매월' if r.get('cfreq') == 'M' else '매년'} {r['contrib']:,.0f}원 적립"
                     if r["contrib"] else ""))
-    st.caption(" · ".join(f"{label(c)} {v * 100:.0f}%" for c, v in w.items()))
+    st.caption(" · ".join(f"{label(c)} {round(v * 100, 1):g}%" for c, v in w.items()))
     st.caption(f"{s_['시작']} ~ {s_['끝']}")
     if r.get("period") and tuple(r["period"]) != (start, end):
         st.warning(f"사이드바 기간({start} ~ {end})이 이 결과와 다릅니다. **백테스트 실행**을 누르면 새 기간으로 다시 계산합니다.")
