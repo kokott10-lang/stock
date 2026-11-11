@@ -135,7 +135,7 @@ def render_dca(r):
     res, s_ = r["res"], r["res"]["summary"]
     cv = res["curve"]
     st.subheader(f"{r['name']} ({r['code']}) · {r['strategy']}")
-    st.caption(f"{s_['시작']} ~ {s_['끝']} · 매수 {s_['매수 횟수']}회")
+    st.caption(f"{s_['시작']} ~ {s_['끝']} · 매수 {s_['매수 횟수']}회 · 매도 없음(마지막 날 평가금액 기준)")
     if r.get("period") and tuple(r["period"]) != (start, end):
         st.warning(f"사이드바 기간({start} ~ {end})이 이 결과와 다릅니다. **백테스트 실행**을 누르면 새 기간으로 다시 계산합니다.")
     if r.get("note"):
@@ -355,8 +355,11 @@ else:
                                  value=500_000 if dca_freq == "M" else 6_000_000, key=f"dca_amt_{dca_freq}")
     commission = c2.number_input("거래비용(편도 %)", min_value=0.0, value=0.1, step=0.01, format="%.2f")
     dca_initial = st.sidebar.number_input("시작할 때 일시금(원, 선택)", min_value=0, value=0, step=1_000_000)
-    st.sidebar.caption(f"{core.DCA_FREQS[dca_freq]} 첫 거래일 종가로 사서 끝까지 보유합니다. "
-                       "1주 단위로 사고 남은 돈은 다음 매수로 넘깁니다(지수는 소수 단위). 매매 전략은 적용하지 않습니다.")
+    st.sidebar.selectbox("전략", ["매수 후 보유 (적립식 고정)"], disabled=True,
+                         help="적립식은 정해진 날마다 사서 팔지 않고 끝까지 보유하는 방식으로만 계산합니다. "
+                              "분할 익절·이동평균 등 매매 전략은 거치식에서 쓸 수 있습니다.")
+    st.sidebar.caption(f"📌 **매수 후 보유** — {core.DCA_FREQS[dca_freq]} 첫 거래일 종가로 사서 팔지 않고 끝까지 보유합니다. "
+                       "1주 단위로 사고 남은 돈은 다음 매수로 넘깁니다(지수는 소수 단위).")
 
 run = st.sidebar.button("백테스트 실행", type="primary", use_container_width=True, disabled=code is None)
 run = (run or st.session_state.pop("auto_run", False)) and code is not None
@@ -377,7 +380,7 @@ if run:
             if mode == "적립식":
                 res = core.run_dca(df, float(dca_amount), dca_freq, float(commission),
                                    float(dca_initial), fractional=is_index)
-                label = f"적립식 · {core.DCA_FREQS[dca_freq]} {dca_amount:,.0f}원"
+                label = f"적립식 매수 후 보유 · {core.DCA_FREQS[dca_freq]} {dca_amount:,.0f}원"
                 if dca_initial:
                     label += f" (+ 일시금 {dca_initial:,.0f}원)"
                 st.session_state["result"] = dict(mode="dca", res=res, name=name, code=code, strategy=label,
