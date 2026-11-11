@@ -12,7 +12,16 @@ import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 
+import importlib
+
 import backtest_core as core
+
+# Streamlit Cloud 는 새 코드를 받으면 이 파일만 다시 읽고, 이미 불러온 backtest_core 는
+# 예전 것을 계속 쓰는 경우가 있다 → 파일이 바뀌었으면 다시 불러온다.
+_core_mtime = os.path.getmtime(core.__file__)
+if getattr(core, "_LOADED_MTIME", None) != _core_mtime:
+    core = importlib.reload(core)
+    core._LOADED_MTIME = _core_mtime
 
 try:
     from streamlit_searchbox import st_searchbox
