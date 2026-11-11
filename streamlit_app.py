@@ -242,7 +242,8 @@ def render_portfolio(r):
     label = lambda c: f"{names.get(c, c)}"  # noqa: E731
     w = res["weights"]
     st.subheader(f"포트폴리오 · 리밸런싱 {core.REBALANCE[r['reb']]}"
-                 + (f" · 매월 {r['contrib']:,.0f}원 적립" if r["contrib"] else ""))
+                 + (f" · {'매월' if r.get('cfreq') == 'M' else '매년'} {r['contrib']:,.0f}원 적립"
+                    if r["contrib"] else ""))
     st.caption(" · ".join(f"{label(c)} {v * 100:.0f}%" for c, v in w.items()))
     st.caption(f"{s_['시작']} ~ {s_['끝']}")
     if r.get("period") and tuple(r["period"]) != (start, end):
@@ -534,10 +535,13 @@ elif mode == "포트폴리오":
                        if wsum else "구성표에 코드와 비중을 입력하세요.")
     pf_reb = st.sidebar.radio("리밸런싱", list(core.REBALANCE), format_func=core.REBALANCE.get, horizontal=True,
                               help="정해진 주기의 첫 거래일에 목표 비중으로 되돌립니다.")
-    c1, c2 = st.sidebar.columns(2)
-    cash = c1.number_input("초기 금액(원)", min_value=100_000, value=10_000_000, step=1_000_000)
-    pf_contrib = c2.number_input("매월 추가 적립(원)", min_value=0, value=0, step=100_000,
-                                 help="0이면 처음 금액만. 넣으면 매월 첫 거래일에 목표 비중대로 나눠 삽니다.")
+    cash = st.sidebar.number_input("초기 금액(원)", min_value=100_000, value=10_000_000, step=1_000_000)
+    pf_cfreq = st.sidebar.radio("추가 적립", ["Y", "M"], format_func={"Y": "매년", "M": "매월"}.get,
+                                horizontal=True, key="pf_cfreq")
+    pf_contrib = st.sidebar.number_input(
+        f"{'매년' if pf_cfreq == 'Y' else '매월'} 추가 적립(원)", min_value=0,
+        value=0, step=1_000_000 if pf_cfreq == "Y" else 100_000, key=f"pf_contrib_{pf_cfreq}",
+        help=f"0이면 처음 금액만. 넣으면 {'매년' if pf_cfreq == 'Y' else '매월'} 첫 거래일에 목표 비중대로 나눠 삽니다.")
     c1, c2 = st.sidebar.columns(2)
     commission = c1.number_input("거래비용(편도 %)", min_value=0.0, value=0.1, step=0.01, format="%.2f")
     pf_cash_rate = c2.number_input("현금(CASH) 연 이자율(%)", min_value=0.0, value=3.0, step=0.5, format="%g")
@@ -587,7 +591,8 @@ if run:
                     idx = (pd.DataFrame(prices).index if prices
                            else pd.bdate_range(start, end))
                     prices[core.CASH] = core.cash_series(idx, float(pf_cash_rate))
-                res = core.run_portfolio(prices, pf_weights, float(cash), float(pf_contrib), pf_reb, float(commission))
+                res = core.run_portfolio(prices, pf_weights, float(cash), float(pf_contrib), pf_reb,
+                                         float(commission), contrib_freq=pf_cfreq)
                 firsts = {c: sr.dropna().index[0] for c, sr in prices.items() if c != core.CASH}
                 latest = max(firsts.values()) if firsts else None
                 late = ([asset_name(c) for c, f in firsts.items() if f >= latest - pd.Timedelta(days=10)]
@@ -596,7 +601,7 @@ if run:
                     notes.add("데이터가 늦게 시작하는 자산(" + ", ".join(late) + ") 때문에 시작일이 "
                               + res["summary"]["시작"] + "로 밀렸습니다.")
                 st.session_state["result"] = dict(mode="portfolio", res=res, period=(start, end), reb=pf_reb,
-                                                  contrib=float(pf_contrib), note=" ".join(sorted(notes)) or None,
+                                                  contrib=float(pf_contrib), cfreq=pf_cfreq, note=" ".join(sorted(notes)) or None,
                                                   names={c: asset_name(c) for c in pf_weights})
                 df = None
             else:

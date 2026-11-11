@@ -791,13 +791,14 @@ def align_prices(prices: dict) -> pd.DataFrame:
     return px
 
 
-def _simulate(px: pd.DataFrame, w: pd.Series, initial: float, contrib: float, rebalance: str, fee: float):
+def _simulate(px: pd.DataFrame, w: pd.Series, initial: float, contrib: float, rebalance: str, fee: float,
+              contrib_freq: str = "Y"):
     """일별 시뮬레이션. 반환: 평가금액, 원금, NAV(시간가중), 자산별 평가금액, 리밸런싱 횟수, 비용 합계"""
     idx = px.index
     p = px.values
     wv = w.reindex(px.columns).values
     reb = period_starts(idx, rebalance) if rebalance != "N" else set()
-    con = period_starts(idx, "M") if contrib > 0 else set()
+    con = period_starts(idx, contrib_freq) if contrib > 0 else set()
 
     units = initial * (1 - fee) * wv / p[0]
     invested, nav, prev_val = initial, 1.0, initial * (1 - fee)
@@ -839,9 +840,10 @@ def _drawdown(nav: pd.Series) -> pd.Series:
 
 
 def run_portfolio(prices: dict, weights: dict, initial: float = 10_000_000, contrib: float = 0.0,
-                  rebalance: str = "Y", commission_pct: float = 0.1) -> dict:
+                  rebalance: str = "Y", commission_pct: float = 0.1, contrib_freq: str = "Y") -> dict:
     """
     prices: {코드: 원화 종가 Series}, weights: {코드: 비중(아무 단위, 합으로 나눔)}
+    contrib: 추가 적립 금액(회당), contrib_freq: "Y"(매년 첫 거래일) / "M"(매월 첫 거래일)
     결과: summary, curve(평가금액·원금·NAV·리밸런싱 안 함 NAV·자산별 NAV), parts(자산별 평가금액),
           yearly(연도별 수익률), compare(비교표)
     """
@@ -852,15 +854,16 @@ def run_portfolio(prices: dict, weights: dict, initial: float = 10_000_000, cont
     px = align_prices({k: prices[k] for k in w.index})
     fee = commission_pct / 100
 
-    val, inv, nav, parts, n_reb, costs = _simulate(px, w, initial, contrib, rebalance, fee)
-    _, _, nav_nr, _, _, _ = _simulate(px, w, initial, contrib, "N", fee)
+    val, inv, nav, parts, n_reb, costs = _simulate(px, w, initial, contrib, rebalance, fee, contrib_freq)
+    _, _, nav_nr, _, _, _ = _simulate(px, w, initial, contrib, "N", fee, contrib_freq)
 
     years = (px.index[-1] - px.index[0]).days / 365.25
     dd = _drawdown(nav)
     daily = nav.pct_change().dropna()
     cagr = (nav.iloc[-1] ** (1 / years) - 1) * 100 if years > 0 else None
 
-    flows_d = [px.index[0]] + [d for d in sorted(period_starts(px.index, "M")) if d != px.index[0]] if contrib > 0 else [px.index[0]]
+    flows_d = ([px.index[0]] + [d for d in sorted(period_starts(px.index, contrib_freq)) if d != px.index[0]]
+               if contrib > 0 else [px.index[0]])
     flows = [-initial] + [-contrib] * (len(flows_d) - 1)
     irr = xirr(flows_d + [px.index[-1]], flows + [val.iloc[-1]]) if contrib > 0 else cagr
 
