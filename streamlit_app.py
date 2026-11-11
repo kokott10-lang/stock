@@ -490,7 +490,7 @@ mode = st.sidebar.radio("투자 방식", ["거치식", "적립식", "포트폴�
                         help="거치식: 한 종목에 처음 한 번 투자 · 적립식: 매월/매년 같은 금액을 사서 보유 · "
                              "포트폴리오: 여러 자산을 비율대로 섞고 주기적으로 리밸런싱")
 skey, info, params, cash = "buyhold", core.STRATEGIES["buyhold"], {}, 0
-pf_weights = {}
+pf_weights, pf_ok = {}, False
 if mode == "거치식":
     c1, c2 = st.sidebar.columns(2)
     cash = c1.number_input("초기 자금(원)", min_value=100_000, value=10_000_000, step=1_000_000)
@@ -548,16 +548,33 @@ elif mode == "포트폴리오":
     pf_weights = {str(c).strip().upper() if not str(c).strip().isdigit() else str(c).strip(): float(v)
                   for c, v in zip(pf_rows["코드"], pf_rows["비중(%)"])}
     wsum = sum(pf_weights.values())
+    pf_ok = bool(wsum) and abs(wsum - 100) < 0.01
     if wsum:
+        if pf_ok:
+            st.sidebar.caption(f"✅ 비중 합계 100% · 자산 {len(pf_weights)}개")
+        else:
+            st.sidebar.warning(f"⚠️ 비중 합계가 **{wsum:g}%** 입니다 ({wsum - 100:+g}%p). "
+                               "합계가 100%가 되도록 표의 비중을 고쳐 주세요. 100%가 되기 전에는 실행할 수 없습니다.")
+
+            def fit_100():
+                rows = st.session_state["pf_df_live"].copy()
+                mask = rows["비중(%)"].fillna(0) > 0
+                total = rows.loc[mask, "비중(%)"].sum()
+                rows.loc[mask, "비중(%)"] = (rows.loc[mask, "비중(%)"] / total * 100).round(1)
+                gap = round(100 - rows.loc[mask, "비중(%)"].sum(), 1)
+                if gap and mask.any():  # 반올림 오차는 가장 큰 비중에 더함
+                    i = rows.loc[mask, "비중(%)"].idxmax()
+                    rows.loc[i, "비중(%)"] = round(rows.loc[i, "비중(%)"] + gap, 1)
+                st.session_state["pf_df"] = rows
+                st.session_state.pop("pf_editor", None)
+
+            st.session_state["pf_df_live"] = pf_edit
+            st.sidebar.button("⚖️ 비율은 유지하고 합계만 100%로 맞추기", on_click=fit_100, use_container_width=True)
         with st.sidebar.popover("ⓘ 구성 자세히", use_container_width=True):
-            st.markdown("\n".join(f"- **{asset_name(c)}** `{c}` — {v / wsum * 100:.1f}%"
-                                   for c, v in pf_weights.items()))
-            if abs(wsum - 100) > 0.01:
-                st.caption(f"입력 합계 {wsum:g}% → 100%로 맞춰 계산합니다.")
-        if abs(wsum - 100) > 0.01:
-            st.sidebar.caption(f"입력 합계 {wsum:g}% → 100%로 맞춰 계산")
+            st.markdown("\n".join(f"- **{asset_name(c)}** `{c}` — {v:g}%" for c, v in pf_weights.items()))
+            st.caption(f"합계 {wsum:g}%")
     else:
-        st.sidebar.caption("구성표에 코드와 비중을 입력하세요.")
+        st.sidebar.warning("구성표에 코드와 비중을 입력하세요.")
     pf_reb = st.sidebar.radio("리밸런싱", list(core.REBALANCE), format_func=core.REBALANCE.get, horizontal=True,
                               help="정해진 주기의 첫 거래일에 목표 비중으로 되돌립니다.")
     cash = st.sidebar.number_input("초기 금액(원)", min_value=100_000, value=10_000_000, step=1_000_000)
@@ -584,7 +601,7 @@ else:
     st.sidebar.caption(f"📌 **매수 후 보유** — {core.DCA_FREQS[dca_freq]} 첫 거래일 종가로 사서 팔지 않고 끝까지 보유합니다. "
                        "1주 단위로 사고 남은 돈은 다음 매수로 넘깁니다(지수는 소수 단위).")
 
-can_run = bool(pf_weights) if mode == "포트폴리오" else code is not None
+can_run = (bool(pf_weights) and pf_ok) if mode == "포트폴리오" else code is not None
 run = st.sidebar.button("백테스트 실행", type="primary", use_container_width=True, disabled=not can_run)
 run = (run or st.session_state.pop("auto_run", False)) and can_run
 
