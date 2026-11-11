@@ -93,6 +93,11 @@ KR_ETFS = [
     ("305720", "KODEX 2차전지산업"),
     ("132030", "KODEX 골드선물(H)"),
     ("261240", "KODEX 미국달러선물"),
+    ("435420", "TIGER 미국나스닥100채권혼합50"),
+    ("396500", "TIGER 반도체TOP10"),
+    ("0072R0", "TIGER KRX금현물"),
+    ("329650", "KODEX TRF3070"),
+    ("329660", "KODEX TRF5050"),
 ]
 
 # 지수: 코드 → (이름, 통화, 시세 조회 순서)
@@ -148,12 +153,20 @@ def _norm(text: str) -> str:
     return "".join(ch for ch in str(text).lower() if ch.isalnum())
 
 
+# 국내 종목코드: 6자리 숫자, 또는 2024년부터 쓰는 영문 혼합 6자리(예: 0072R0)
+_KR_CODE = re.compile(r"\d{4}[0-9A-HJ-NP-TV-Z][0-9KLMN]")
+
+
+def is_kr_code(code: str) -> bool:
+    return bool(_KR_CODE.fullmatch(str(code).strip().upper()))
+
+
 def currency(code: str) -> str:
-    """종목 통화: 지수는 표에 정한 대로, 6자리 숫자는 원화, 그 외(미국 티커)는 달러"""
+    """종목 통화: 지수는 표에 정한 대로, 국내 종목코드는 원화, 그 외(미국 티커)는 달러"""
     code = code.upper()
     if code in INDICES:
         return INDICES[code][1]
-    return "KRW" if (code.isdigit() and len(code) == 6) else "USD"
+    return "KRW" if is_kr_code(code) else "USD"
 
 
 def is_foreign(code: str) -> bool:
@@ -251,7 +264,7 @@ def search_listing(df: pd.DataFrame, q: str, limit: int = 30) -> pd.DataFrame:
     # 목록에 없는 코드도 직접 입력 가능하게: 6자리 숫자 또는 영문 티커
     raw = q.upper()
     if raw not in set(out["Code"].str.upper()):
-        if (raw.isdigit() and len(raw) == 6) or (raw.isascii() and raw.isalpha() and 1 <= len(raw) <= 5):
+        if is_kr_code(raw) or (raw.isascii() and raw.isalpha() and 1 <= len(raw) <= 5):
             direct = pd.DataFrame([(raw, raw, "코드 직접 입력")], columns=["Code", "Name", "Market"])
             out = pd.concat([out, direct], ignore_index=True)
     return out
@@ -762,6 +775,31 @@ PORTFOLIO_PRESETS = {
     "올웨더형 (주식 30 · 장기채 40 · 중기채 15 · 금 15)": {"SPY": 15, "QQQ": 15, "TLT": 40, "IEF": 15, "GLD": 15},
     "코스피 지수 100% (비교용)": {"KS11": 100},
     "미국 주식 100% (S&P500 50 · 나스닥100 50, 비교용)": {"SPY": 50, "QQQ": 50},
+    # 내 연금계좌 3개(DC·연금저축·개인연금) 합산 비중, 2026-11-11 평가금액 기준. 금액은 넣지 않고 비율만 둔다.
+    #   가장 늦게 상장한 TIGER KRX금현물(2025년) 이후 기간만 계산된다.
+    "내 연금계좌 (실제 보유 ETF · 2025년부터)": {
+        "360750": 29.4,   # TIGER 미국S&P500
+        "133690": 26.5,   # TIGER 미국나스닥100
+        "435420": 20.5,   # TIGER 미국나스닥100채권혼합50
+        "458730": 10.4,   # TIGER 미국배당다우존스
+        "396500": 4.8,    # TIGER 반도체TOP10
+        "329650": 3.1,    # KODEX TRF3070
+        "102110": 3.0,    # TIGER 200
+        "0072R0": 1.6,    # TIGER KRX금현물
+        "348950": 0.4,    # 제이알글로벌리츠
+        "329660": 0.3,    # KODEX TRF5050
+    },
+    # 같은 비중을 역사가 긴 자산으로 바꾼 것 (SCHD 상장 2011-10 이후 계산 가능)
+    #   채권혼합50 → 나스닥100 절반 + 현금 절반 · TRF → 주식 몫은 SPY, 채권 몫은 현금 · 리츠는 현금
+    "내 연금계좌 (장기 검증용 대체 자산 · 2011년부터)": {
+        "QQQ": 36.75,     # 나스닥100 26.5 + 채권혼합50의 절반 10.25
+        "SPY": 30.5,      # S&P500 29.4 + TRF의 주식 몫 1.1
+        "SCHD": 10.4,     # 미국배당다우존스
+        "091160": 4.8,    # KODEX 반도체 (반도체TOP10 대신)
+        "069500": 3.0,    # KODEX 200
+        "GLD": 1.6,       # 금
+        CASH: 12.95,      # 채권혼합50의 채권 10.25 + TRF의 채권 2.3 + 리츠 0.4
+    },
 }
 
 
